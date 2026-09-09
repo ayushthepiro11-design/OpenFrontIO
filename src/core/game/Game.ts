@@ -912,6 +912,23 @@ export interface Game extends GameMap {
   addUpdate(update: GameUpdate): void;
   railNetwork(): RailNetwork;
   conquerPlayer(conqueror: Player, conquered: Player): void;
+  // Bounty market
+  /** Pool gold onto `target`'s head, debiting `placer`. Returns gold actually pooled. */
+  placeBounty(placer: Player, target: Player, gold: Gold): Gold;
+  /** Total gold currently pooled on `player`'s head (0 when none). */
+  bountyTotal(player: Player): Gold;
+  /** True when `placer` may pool onto `target` right now (config, cooldown, self/team gates). */
+  canPlaceBounty(placer: Player, target: Player): boolean;
+  /**
+   * Pay `conquered`'s bounty pool out to `collector` (the killing-blow
+   * conqueror). No-op when the pool is empty. Emits BountyCollectedEvent.
+   */
+  resolveBounty(collector: Player, conquered: Player): void;
+  /**
+   * Refund `conquered`'s bounty pool proportionally to its contributors —
+   * used when the player dies with no conqueror (fallout, disconnect, quit).
+   */
+  refundBounties(conquered: Player): void;
   miniWaterHPA(): PathFinder<number> | null;
   miniWaterGraph(): AbstractGraph | null;
   getWaterComponent(tile: TileRef): number | null;
@@ -1017,6 +1034,7 @@ export interface PlayerInteraction {
   canTarget: boolean;
   canDonateGold: boolean;
   canDonateTroops: boolean;
+  canPlaceBounty: boolean;
   canEmbargo: boolean;
   allianceInfo?: AllianceInfo;
 }
@@ -1049,6 +1067,8 @@ export enum MessageType {
   ALLIANCE_EXPIRED,
   DONATION_SENT,
   DONATION_RECEIVED,
+  BOUNTY_PLACED,
+  BOUNTY_COLLECTED,
   CHAT,
   RENEW_ALLIANCE,
 }
@@ -1085,6 +1105,8 @@ export const MESSAGE_TYPE_CATEGORIES: Record<MessageType, MessageCategory> = {
   [MessageType.RENEW_ALLIANCE]: MessageCategory.ALLIANCE,
   [MessageType.DONATION_SENT]: MessageCategory.TRADE,
   [MessageType.DONATION_RECEIVED]: MessageCategory.TRADE,
+  [MessageType.BOUNTY_PLACED]: MessageCategory.TRADE,
+  [MessageType.BOUNTY_COLLECTED]: MessageCategory.TRADE,
   [MessageType.CHAT]: MessageCategory.CHAT,
 } as const;
 
