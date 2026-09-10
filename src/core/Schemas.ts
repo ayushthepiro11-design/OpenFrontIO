@@ -690,6 +690,9 @@ export const PlaceBountyIntentSchema = z.object({
   type: z.literal("place_bounty"),
   recipient: MappedID,
   gold: zb.float({ min: 0 }).nullable(),
+  // Anonymous placements hide the placer from the bounty toast for a 10%
+  // burn fee. Optional so older clients/servers keep working.
+  anonymous: z.boolean().optional(),
 });
 
 export const DonateTroopIntentSchema = z.object({

@@ -751,6 +751,10 @@ export class Config {
   bountyMinAmount(): Gold {
     return 1_000n;
   }
+  /** Ticks a bounty pool survives without a top-up before expiring. */
+  bountyExpiryTicks(): Tick {
+    return 300 * 10;
+  }
   embargoAllCooldown(): Tick {
     return 10 * 10;
   }

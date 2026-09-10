@@ -139,6 +139,7 @@ export class SendPlaceBountyIntentEvent implements GameEvent {
   constructor(
     public readonly recipient: PlayerView,
     public readonly gold: Gold | null,
+    public readonly anonymous: boolean = false,
   ) {}
 }
 
@@ -782,6 +783,7 @@ export class Transport {
       type: "place_bounty",
       recipient: event.recipient.id(),
       gold: event.gold ? Number(event.gold) : null,
+      anonymous: event.anonymous === true ? true : undefined,
     });
   }
 

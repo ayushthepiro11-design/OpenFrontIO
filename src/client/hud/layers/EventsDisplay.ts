@@ -8,6 +8,7 @@ import {
   AllianceExpiredUpdate,
   AllianceRequestReplyUpdate,
   BountyCollectedUpdate,
+  BountyExpiredUpdate,
   BountyPlacedUpdate,
   BrokeAllianceUpdate,
   DisplayChatMessageUpdate,
@@ -145,6 +146,10 @@ export class EventsDisplay extends LitElement implements Controller {
     [
       GameUpdateType.BountyCollectedEvent,
       this.onBountyCollectedEvent.bind(this),
+    ],
+    [
+      GameUpdateType.BountyExpiredEvent,
+      this.onBountyExpiredEvent.bind(this),
     ],
   ] as const;
 
@@ -511,16 +516,34 @@ export class EventsDisplay extends LitElement implements Controller {
 
     this.addEvent({
       description: isTarget
-        ? translateText("events_display.bounty_on_you", {
-            name: placer.displayName(),
-            gold: renderNumber(update.amount),
-          })
-        : translateText("events_display.bounty_placed", {
-            placer: placer.displayName(),
-            target: target.displayName(),
-            gold: renderNumber(update.amount),
-            total: renderNumber(update.totalPool),
-          }),
+        ? translateText(
+            update.anonymous
+              ? "events_display.bounty_on_you_anonymous"
+              : "events_display.bounty_on_you",
+            update.anonymous
+              ? { gold: renderNumber(update.amount) }
+              : {
+                  name: placer.displayName(),
+                  gold: renderNumber(update.amount),
+                },
+          )
+        : translateText(
+            update.anonymous
+              ? "events_display.bounty_placed_anonymous"
+              : "events_display.bounty_placed",
+            update.anonymous
+              ? {
+                  target: target.displayName(),
+                  gold: renderNumber(update.amount),
+                  total: renderNumber(update.totalPool),
+                }
+              : {
+                  placer: placer.displayName(),
+                  target: target.displayName(),
+                  gold: renderNumber(update.amount),
+                  total: renderNumber(update.totalPool),
+                },
+          ),
       type: MessageType.BOUNTY_PLACED,
       highlight: true,
       createdAt: this.game.ticks(),
@@ -555,6 +578,24 @@ export class EventsDisplay extends LitElement implements Controller {
       highlight: true,
       createdAt: this.game.ticks(),
       focusID: collector.smallID(),
+    });
+  }
+
+  onBountyExpiredEvent(update: BountyExpiredUpdate) {
+    const myPlayer = this.game.myPlayer();
+    if (!myPlayer) return;
+
+    const target = this.game.player(update.targetId) as PlayerView;
+    if (!target) return;
+
+    this.addEvent({
+      description: translateText("events_display.bounty_expired", {
+        target: target.displayName(),
+      }),
+      type: MessageType.BOUNTY_EXPIRED,
+      highlight: false,
+      createdAt: this.game.ticks(),
+      focusID: target.smallID(),
     });
   }
 

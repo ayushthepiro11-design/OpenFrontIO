@@ -731,7 +731,10 @@
     "trade_ship_captured": "Your trade ship was captured by {name}",
     "unit_destroyed": "Your {unit} was destroyed",
     "unit_voluntarily_deleted": "Unit voluntarily deleted",
-    "wants_to_renew_alliance": "{name} wants to renew your alliance"
+    "wants_to_renew_alliance": "{name} wants to renew your alliance",
+    "bounty_on_you_anonymous": "Someone put a {gold} gold bounty on your head!",
+    "bounty_placed_anonymous": "An anonymous benefactor put a {gold} gold bounty on {target}’s head (pool: {total})",
+    "bounty_expired": "The bounty on {target}’s head expired — stakes refunded"
   },
   "featured_stream": {
     "expand": "Expand",
@@ -2226,6 +2229,9 @@
     "place_bounty": "Place Bounty",
     "modal_title_with_name": "Place a bounty on {name}",
     "badge_label": "Bounty: {gold} gold",
-    "badge_title": "Gold pooled on this player’s head — whoever lands the killing blow collects it"
+    "badge_title": "Gold pooled on this player’s head — whoever lands the killing blow collects it",
+    "board_title": "Most Wanted",
+    "anonymous_label": "Place anonymously",
+    "anonymous_fee_note": "+10% secrecy fee, burned"
   }
 }

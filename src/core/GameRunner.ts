@@ -1,5 +1,6 @@
 import { placeName, placeSpawnName } from "../client/hud/NameBoxCalculator";
 import { Config } from "./configuration/Config";
+import { BountyExpiryExecution } from "./execution/BountyExpiryExecution";
 import { DoomsdayClockExecution } from "./execution/DoomsdayClockExecution";
 import { Executor } from "./execution/ExecutionManager";
 import { RecomputeRailClusterExecution } from "./execution/RecomputeRailClusterExecution";
@@ -120,6 +121,9 @@ export class GameRunner {
       );
     }
     this.game.addExecution(new WinCheckExecution());
+    if (this.game.config().bountiesEnabled()) {
+      this.game.addExecution(new BountyExpiryExecution());
+    }
     if (this.game.config().doomsdayClockConfig().enabled) {
       this.game.addExecution(new DoomsdayClockExecution());
     }

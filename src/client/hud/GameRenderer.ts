@@ -21,6 +21,7 @@ import { FrameProfiler } from "./FrameProfiler";
 import { ActionableEvents } from "./layers/ActionableEvents";
 import { AlertFrame } from "./layers/AlertFrame";
 import { AttacksDisplay } from "./layers/AttacksDisplay";
+import { BountyBoard } from "./layers/BountyBoard";
 import { BuildMenu } from "./layers/BuildMenu";
 import { ChatDisplay } from "./layers/ChatDisplay";
 import { ChatModal } from "./layers/ChatModal";
@@ -124,6 +125,13 @@ export function createRenderer(
   actionableEvents.eventBus = eventBus;
   actionableEvents.game = game;
   actionableEvents.uiState = uiState;
+
+  const bountyBoard = document.querySelector("bounty-board") as BountyBoard;
+  if (!(bountyBoard instanceof BountyBoard)) {
+    console.error("bounty board not found");
+  }
+  bountyBoard.eventBus = eventBus;
+  bountyBoard.game = game;
 
   const attacksDisplay = document.querySelector(
     "attacks-display",
@@ -332,6 +340,7 @@ export function createRenderer(
     ...(mapLayerController ? [mapLayerController] : []),
     eventsDisplay,
     actionableEvents,
+    bountyBoard,
     attacksDisplay,
     chatDisplay,
     buildMenu,

@@ -12,19 +12,26 @@ import {
 import {
   GameUpdateType,
   type BountyCollectedUpdate,
+  type BountyExpiredUpdate,
   type BountyPlacedUpdate,
 } from "../src/core/game/GameUpdates";
 import { GameID } from "../src/core/Schemas";
 import { setup } from "./util/Setup";
+import { BountyExpiryExecution } from "../src/core/execution/BountyExpiryExecution";
 
 // Collects bounty updates from the GameUpdates maps returned by
 // game.executeNextTick() across a run of ticks.
 function runTicks(
   game: { executeNextTick(): GameUpdates },
   n: number,
-): { placed: BountyPlacedUpdate[]; collected: BountyCollectedUpdate[] } {
+): {
+  placed: BountyPlacedUpdate[];
+  collected: BountyCollectedUpdate[];
+  expired: BountyExpiredUpdate[];
+} {
   const placed: BountyPlacedUpdate[] = [];
   const collected: BountyCollectedUpdate[] = [];
+  const expired: BountyExpiredUpdate[] = [];
   for (let i = 0; i < n; i++) {
     const updates = game.executeNextTick();
     placed.push(
@@ -33,8 +40,11 @@ function runTicks(
     collected.push(
       ...((updates[GameUpdateType.BountyCollectedEvent] ?? []) as BountyCollectedUpdate[]),
     );
+    expired.push(
+      ...((updates[GameUpdateType.BountyExpiredEvent] ?? []) as BountyExpiredUpdate[]),
+    );
   }
-  return { placed, collected };
+  return { placed, collected, expired };
 }
 
 describe("Bounty market", () => {
@@ -417,5 +427,85 @@ describe("Bounty market", () => {
     game.executeNextTick();
     game.executeNextTick();
     expect(game.bountyTotal(p2)).toBe(0n);
+  });
+
+  it("should burn a 10% fee and hide the placer on anonymous bounties", async () => {
+    const gameID: GameID = "game_id";
+    const game = await setup("ocean_and_land", {
+      infiniteGold: false,
+      bountiesEnabled: true,
+    });
+
+    const placerInfo = new PlayerInfo("placer", PlayerType.Human, null, "p1");
+    const targetInfo = new PlayerInfo("target", PlayerType.Human, null, "p2");
+    game.addPlayer(placerInfo);
+    game.addPlayer(targetInfo);
+    const placer = game.player(placerInfo.id);
+    const target = game.player(targetInfo.id);
+
+    game.addExecution(
+      new SpawnExecution(gameID, placerInfo, game.ref(2, 4)),
+      new SpawnExecution(gameID, targetInfo, game.ref(2, 8)),
+    );
+    game.executeNextTick();
+    game.executeNextTick();
+
+    placer.addGold(10_000n);
+    const placerGoldBefore = placer.gold();
+    game.addExecution(new BountyExecution(placer, targetInfo.id, 5_000, true));
+    const { placed } = runTicks(game, 2);
+
+    // Full 5k debited, 4.5k pooled, 500 burned (worker income over the
+    // settling ticks offsets a little, hence the loose lower bound).
+    expect(placer.gold()).toBeLessThan(placerGoldBefore - 4_000n);
+    expect(game.bountyTotal(target)).toBe(4_500n);
+    expect(placed.length).toBe(1);
+    expect(placed[0].anonymous).toBe(true);
+    expect(placed[0].amount).toBe(4_500n);
+  });
+
+  it("should expire stale pools with refund and event", async () => {
+    const gameID: GameID = "game_id";
+    const game = await setup("ocean_and_land", {
+      infiniteGold: false,
+      bountiesEnabled: true,
+    });
+
+    const placerInfo = new PlayerInfo("placer", PlayerType.Human, null, "p1");
+    const targetInfo = new PlayerInfo("target", PlayerType.Human, null, "p2");
+    game.addPlayer(placerInfo);
+    game.addPlayer(targetInfo);
+    const placer = game.player(placerInfo.id);
+    const target = game.player(targetInfo.id);
+
+    game.addExecution(
+      new SpawnExecution(gameID, placerInfo, game.ref(2, 4)),
+      new SpawnExecution(gameID, targetInfo, game.ref(2, 8)),
+    );
+    game.executeNextTick();
+    game.executeNextTick();
+
+    // Persistent janitor, mirroring GameRunner.init.
+    game.addExecution(new BountyExpiryExecution());
+    game.executeNextTick();
+
+    placer.addGold(10_000n);
+    game.addExecution(new BountyExecution(placer, targetInfo.id, 5_000));
+    runTicks(game, 2);
+    expect(game.bountyTotal(target)).toBe(5_000n);
+    const placerGoldAfterPlace = placer.gold();
+
+    // Topping up refreshes the deadline: advance just short of it and the
+    // pool must still be alive.
+    const expiry = game.config().bountyExpiryTicks();
+    runTicks(game, expiry - 10);
+    expect(game.bountyTotal(target)).toBe(5_000n);
+
+    // Past the deadline: refunded + event emitted.
+    const { expired } = runTicks(game, 20);
+    expect(game.bountyTotal(target)).toBe(0n);
+    expect(placer.gold()).toBeGreaterThanOrEqual(placerGoldAfterPlace + 5_000n);
+    expect(expired.length).toBe(1);
+    expect(expired[0].targetId).toBe(target.id());
   });
 });

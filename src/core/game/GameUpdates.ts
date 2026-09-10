@@ -108,6 +108,7 @@ export enum GameUpdateType {
   DonateEvent,
   BountyPlacedEvent,
   BountyCollectedEvent,
+  BountyExpiredEvent,
 }
 
 export type GameUpdate =
@@ -135,7 +136,8 @@ export type GameUpdate =
   | GamePausedUpdate
   | DonateEventUpdate
   | BountyPlacedUpdate
-  | BountyCollectedUpdate;
+  | BountyCollectedUpdate
+  | BountyExpiredUpdate;
 
 export interface BonusEventUpdate {
   type: GameUpdateType.BonusEvent;
@@ -187,6 +189,8 @@ export interface BountyPlacedUpdate {
   amount: bigint;
   /** Total pool on the target after this placement. */
   totalPool: bigint;
+  /** Anonymous placements hide the placer from the toast. */
+  anonymous: boolean;
 }
 
 export interface BountyCollectedUpdate {
@@ -194,6 +198,11 @@ export interface BountyCollectedUpdate {
   collectorId: PlayerID;
   targetId: PlayerID;
   amount: bigint;
+}
+
+export interface BountyExpiredUpdate {
+  type: GameUpdateType.BountyExpiredEvent;
+  targetId: PlayerID;
 }
 
 export interface UnitUpdate {

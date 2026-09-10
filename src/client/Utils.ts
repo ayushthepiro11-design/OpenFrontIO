@@ -684,6 +684,8 @@ export function getMessageTypeClasses(type: MessageType): string {
       return severityColors["success"];
     case MessageType.BOUNTY_PLACED:
       return severityColors["fail"];
+    case MessageType.BOUNTY_EXPIRED:
+      return severityColors["warn"];
     case MessageType.MIRV_INBOUND:
     case MessageType.NUKE_INBOUND:
     case MessageType.HYDROGEN_BOMB_INBOUND:

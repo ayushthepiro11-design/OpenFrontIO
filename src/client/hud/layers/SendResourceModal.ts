@@ -33,6 +33,7 @@ export class SendResourceModal extends LitElement {
 
   @state() private sendAmount: number = 0;
   @state() private selectedPercent: number | null = null;
+  @state() private anonymous: boolean = false;
 
   private PRESETS = [10, 25, 50, 75, 100] as const;
 
@@ -84,6 +85,7 @@ export class SendResourceModal extends LitElement {
   }
 
   private closeModal() {
+    this.anonymous = false;
     this.dispatchEvent(new CustomEvent("close"));
   }
 
@@ -105,7 +107,9 @@ export class SendResourceModal extends LitElement {
     } else if (this.mode === "bounty") {
       const myGold = Number(myPlayer.gold());
       if (amount > myGold) return;
-      this.eventBus.emit(new SendPlaceBountyIntentEvent(target, BigInt(amount)));
+      this.eventBus.emit(
+        new SendPlaceBountyIntentEvent(target, BigInt(amount), this.anonymous),
+      );
     } else {
       const myGold = Number(myPlayer.gold());
       if (amount > myGold) return;
@@ -424,7 +428,32 @@ export class SendResourceModal extends LitElement {
     </p>`;
   }
 
-  private renderSummary(allowed: number) {
+  // Bounty only: hide the placer's name from the bounty toast for a 10%
+  // burn fee. Reset whenever the modal opens in another mode.
+  private renderAnonymousToggle() {
+    if (this.mode !== "bounty") return html``;
+    return html`
+      <label
+        class="mt-3 flex items-center gap-2 cursor-pointer select-none text-sm text-zinc-300"
+      >
+        <input
+          type="checkbox"
+          class="size-4 accent-red-500"
+          ?checked=${this.anonymous}
+          @change=${(e: Event) => {
+            this.anonymous = (e.target as HTMLInputElement).checked;
+          }}
+        />
+        <span>${translateText("bounty.anonymous_label")}</span>
+        <span class="text-xs text-zinc-500"
+          >${translateText("bounty.anonymous_fee_note")}</span
+        >
+      </label>
+    `;
+  }
+
+    private renderSummary(allowed: number) {
+
     const total = this.getTotalNumber();
     const keep = this.keepAfter(allowed);
     const belowMinKeep =
@@ -572,6 +601,7 @@ export class SendResourceModal extends LitElement {
             ${this.mode === "troops"
               ? this.renderCapacityNote(allowed)
               : html``}
+            ${this.renderAnonymousToggle()}
             ${this.renderSummary(allowed)} ${this.renderActions()}
             ${this.renderSliderStyles()}
           </div>

@@ -121,6 +121,12 @@ export class GameImpl implements Game {
   private bountyPools = new Map<PlayerID, Map<PlayerID, Gold>>();
   /** Last tick each placer pooled onto each target, for the placement cooldown. */
   private lastBountyTick = new Map<string, Tick>();
+  /**
+   * Per-target pool expiry deadline (ticks). Refreshed on every placement —
+   * the market stays live while funded; stale pools refund automatically via
+   * BountyExpiryExecution. Cleared together with the pool on payout/refund.
+   */
+  private bountyDeadlines = new Map<PlayerID, Tick>();
 
   private _isPaused: boolean = false;
   private _winner: Player | Team | null = null;
@@ -1348,29 +1354,43 @@ export class GameImpl implements Game {
     return true;
   }
 
-  placeBounty(placer: Player, target: Player, gold: Gold): Gold {
+  placeBounty(
+    placer: Player,
+    target: Player,
+    gold: Gold,
+    anonymous: boolean = false,
+  ): Gold {
+    // Anonymous placements burn a 10% secrecy fee: removed from the placer
+    // but never entering the pool (a small gold sink for the privilege).
+    const fee = anonymous ? gold / 10n : 0n;
     // Clamp to what the placer can actually pay; removeGold does the same
     // clamping, but we need the real amount for the pool bookkeeping.
     const amount = gold <= 0n ? 0n : placer.removeGold(gold);
     if (amount === 0n) return 0n;
+    const pooled = amount - fee;
 
     let pool = this.bountyPools.get(target.id());
     if (!pool) {
       pool = new Map<PlayerID, Gold>();
       this.bountyPools.set(target.id(), pool);
     }
-    pool.set(placer.id(), (pool.get(placer.id()) ?? 0n) + amount);
+    pool.set(placer.id(), (pool.get(placer.id()) ?? 0n) + pooled);
     this.lastBountyTick.set(`${placer.id()}:${target.id()}`, this._ticks);
+    this.bountyDeadlines.set(
+      target.id(),
+      this._ticks + this._config.bountyExpiryTicks(),
+    );
 
     const total = this.bountyPoolTotal(target.id());
     this.addUpdate({
       type: GameUpdateType.BountyPlacedEvent,
       placerId: placer.id(),
       targetId: target.id(),
-      amount,
+      amount: pooled,
       totalPool: total,
+      anonymous,
     });
-    return amount;
+    return pooled;
   }
 
   bountyTotal(player: Player): Gold {
@@ -1389,6 +1409,7 @@ export class GameImpl implements Game {
     const pool = this.bountyPools.get(conquered.id());
     if (!pool) return;
     this.bountyPools.delete(conquered.id());
+    this.bountyDeadlines.delete(conquered.id());
 
     let total = 0n;
     for (const amount of pool.values()) total += amount;
@@ -1407,6 +1428,7 @@ export class GameImpl implements Game {
     const pool = this.bountyPools.get(conquered.id());
     if (!pool) return;
     this.bountyPools.delete(conquered.id());
+    this.bountyDeadlines.delete(conquered.id());
 
     for (const [contributorID, amount] of pool) {
       if (amount === 0n) continue;
@@ -1415,6 +1437,30 @@ export class GameImpl implements Game {
       // their stake rather than gold-ghosting a dead player.
       if (contributor && contributor.isAlive()) {
         contributor.addGold(amount);
+      }
+    }
+  }
+
+  /**
+   * Expire every bounty pool whose deadline passed: contributors are
+   * refunded (same path as no-killer deaths) and a BountyExpiredEvent is
+   * emitted per expired target. Called once per tick by
+   * BountyExpiryExecution; cheap no-op when no pools exist.
+   */
+  expireBounties(ticks: number): void {
+    if (this.bountyDeadlines.size === 0) return;
+    for (const [targetID, deadline] of this.bountyDeadlines) {
+      if (ticks < deadline) continue;
+      const target = this._players.get(targetID);
+      if (target) {
+        this.refundBounties(target);
+        this.addUpdate({
+          type: GameUpdateType.BountyExpiredEvent,
+          targetId: targetID,
+        });
+      } else {
+        this.bountyPools.delete(targetID);
+        this.bountyDeadlines.delete(targetID);
       }
     }
   }
