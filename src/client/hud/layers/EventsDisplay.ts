@@ -562,6 +562,27 @@ export class EventsDisplay extends LitElement implements Controller {
     const target = this.game.player(update.targetId) as PlayerView;
     if (!collector || !target) return;
 
+    // amount 0 means the collector had contributed to the pool:
+    // contributors can't collect — everyone was refunded instead.
+    if (update.amount === 0n) {
+      this.addEvent({
+        description:
+          update.collectorId === myPlayer.id()
+            ? translateText("events_display.bounty_voided_you", {
+                target: target.displayName(),
+              })
+            : translateText("events_display.bounty_voided", {
+                name: collector.displayName(),
+                target: target.displayName(),
+              }),
+        type: MessageType.BOUNTY_COLLECTED,
+        highlight: true,
+        createdAt: this.game.ticks(),
+        focusID: collector.smallID(),
+      });
+      return;
+    }
+
     this.addEvent({
       description:
         update.collectorId === myPlayer.id()

@@ -49,18 +49,31 @@
   await sleep(16000);
   log("spawn settled");
 
-  // 3. Grid-search right-clicks for an enemy tile: bounty slice appears.
+  // 3. Grid-search right-clicks for an enemy tile with an ENABLED bounty
+  // slice. Disabled slices (opacity 0.5: tribe territory, teammates, self,
+  // cooldown) swallow clicks, so only an enabled one is clickable.
+  const enabledBountyPath = () => {
+    const contents = [...document.querySelectorAll('g.menu-item-content[data-id="place_bounty"]')];
+    for (const content of contents) {
+      const img = content.querySelector("image");
+      if (img && img.getAttribute("opacity") === "0.5") continue;
+      const menu = content.closest("svg");
+      const pathEl = menu?.querySelector('path[data-id="place_bounty"]');
+      if (pathEl) return pathEl;
+    }
+    return null;
+  };
   let bountyPath = null;
   outer: for (let round = 0; round < 6; round++) {
     for (const [x, y] of grid) {
       rightClick(x, y);
       await sleep(600);
-      const hit = document.querySelector('path[data-id="place_bounty"]');
+      const hit = enabledBountyPath();
       if (hit) { bountyPath = hit; break outer; }
     }
     await sleep(3000); // let the sim advance between sweeps
   }
-  if (!bountyPath) throw new Error("no enemy tile found with a bounty slice");
+  if (!bountyPath) throw new Error("no enemy tile found with an enabled bounty slice");
   log("bounty slice found");
 
   // 4. Click the bounty slice -> SendResourceModal opens in bounty mode.
@@ -99,6 +112,26 @@
     throw new Error("no bounty toast in events display; text was: " + eventsText.slice(0, 300));
   }
   log("bounty toast visible");
+
+  // 7. Most-wanted board lives in the left sidebar leaderboard section:
+  // toggle it open and assert the placed bounty is listed with its pool.
+  const sidebar = document.querySelector("game-left-sidebar");
+  if (!sidebar) throw new Error("game-left-sidebar missing");
+  const toggleBtns = [...sidebar.querySelectorAll("div[role='button']")];
+  // The bounty toggle is the one whose img alt is the board title.
+  const bountyToggle = toggleBtns.find((b) =>
+    (b.querySelector("img")?.getAttribute("alt") ?? "").toLowerCase().includes("wanted"),
+  );
+  if (!bountyToggle) throw new Error("bounty sidebar toggle not found");
+  bountyToggle.click();
+  await sleep(1500);
+  const board = document.querySelector("bounty-board");
+  if (!board) throw new Error("bounty-board element missing");
+  const boardText = (board.textContent ?? "").toLowerCase();
+  if (!boardText.includes("wanted")) {
+    throw new Error("most-wanted board did not render; text was: " + boardText.slice(0, 300));
+  }
+  log("most-wanted board visible in sidebar");
 
   return "SMOKE_OK";
 })()

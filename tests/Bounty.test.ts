@@ -19,6 +19,33 @@ import { GameID } from "../src/core/Schemas";
 import { setup } from "./util/Setup";
 import { BountyExpiryExecution } from "../src/core/execution/BountyExpiryExecution";
 
+// The killing blow: conquerPlayer is the single choke-point both attack
+// and encirclement deaths route through. Call it MID-TICK via a tiny
+// execution wrapper — GameImpl resets the per-tick update buffer at the
+// start of executeNextTick, so updates emitted between ticks (direct
+// calls) would be wiped. Real callers (AttackExecution etc.) only ever
+// invoke it mid-tick, so this mirrors production.
+class ConquerOnce implements Execution {
+  private done = false;
+  constructor(
+    private game: { conquerPlayer(killer: Player, victim: Player): void },
+    private killer: Player,
+    private victim: Player,
+  ) {}
+  init(): void {}
+  tick(): void {
+    if (this.done) return;
+    this.done = true;
+    this.game.conquerPlayer(this.killer, this.victim);
+  }
+  isActive(): boolean {
+    return !this.done;
+  }
+  activeDuringSpawnPhase(): boolean {
+    return true;
+  }
+}
+
 // Collects bounty updates from the GameUpdates maps returned by
 // game.executeNextTick() across a run of ticks.
 function runTicks(
@@ -213,30 +240,10 @@ describe("Bounty market", () => {
     runTicks(game, 2);
     expect(game.bountyTotal(victim)).toBe(5_000n);
 
-    // The killing blow: conquerPlayer is the single choke-point both attack
-    // and encirclement deaths route through. Call it MID-TICK via a tiny
-    // execution wrapper — GameImpl resets the per-tick update buffer at the
-    // start of executeNextTick, so updates emitted between ticks (direct
-    // calls) would be wiped. Real callers (AttackExecution etc.) only ever
-    // invoke it mid-tick, so this mirrors production.
-    class ConquerOnce implements Execution {
-      private done = false;
-      constructor(private killer: Player, private victim: Player) {}
-      init(): void {}
-      tick(): void {
-        if (this.done) return;
-        this.done = true;
-        game.conquerPlayer(this.killer, this.victim);
-      }
-      isActive(): boolean {
-        return !this.done;
-      }
-      activeDuringSpawnPhase(): boolean {
-        return true;
-      }
-    }
+    // The killing blow via the shared mid-tick wrapper (see top of file
+    // for why direct calls don't work in tests).
     const killerGoldBefore = killer.gold();
-    game.addExecution(new ConquerOnce(killer, victim));
+    game.addExecution(new ConquerOnce(game, killer, victim));
     // First tick inits the wrapper execution; the second runs its tick,
     // which is where the conquest (and the bounty payout) happens.
     const { collected } = runTicks(game, 2);
@@ -427,6 +434,88 @@ describe("Bounty market", () => {
     game.executeNextTick();
     game.executeNextTick();
     expect(game.bountyTotal(p2)).toBe(0n);
+  });
+
+  it("should reject bounties on tribes (humans and nations only)", async () => {
+    const gameID: GameID = "game_id";
+    const game = await setup("ocean_and_land", {
+      infiniteGold: false,
+      bountiesEnabled: true,
+    });
+
+    const p1Info = new PlayerInfo("p1", PlayerType.Human, null, "p1");
+    const botInfo = new PlayerInfo("bot", PlayerType.Bot, null, "bot");
+    game.addPlayer(p1Info);
+    game.addPlayer(botInfo);
+    const p1 = game.player(p1Info.id);
+    const bot = game.player(botInfo.id);
+
+    game.addExecution(
+      new SpawnExecution(gameID, p1Info, game.ref(2, 4)),
+      new SpawnExecution(gameID, botInfo, game.ref(2, 6)),
+    );
+    game.executeNextTick();
+    game.executeNextTick();
+    expect(p1.isAlive()).toBe(true);
+    expect(bot.isAlive()).toBe(true);
+
+    // Tribes are beneath the market: mindless packs hold no grudges.
+    p1.addGold(10_000n);
+    expect(game.canPlaceBounty(p1, bot)).toBe(false);
+
+    game.addExecution(new BountyExecution(p1, botInfo.id, 5_000));
+    game.executeNextTick();
+    game.executeNextTick();
+    expect(game.bountyTotal(bot)).toBe(0n);
+  });
+
+  it("should refund (not pay) when a contributor lands the killing blow", async () => {
+    const gameID: GameID = "game_id";
+    const game = await setup("ocean_and_land", {
+      infiniteGold: false,
+      bountiesEnabled: true,
+    });
+
+    const placerInfo = new PlayerInfo("placer", PlayerType.Human, null, "p1");
+    const rivalInfo = new PlayerInfo("rival", PlayerType.Human, null, "r");
+    const victimInfo = new PlayerInfo("victim", PlayerType.Human, null, "v");
+    game.addPlayer(placerInfo);
+    game.addPlayer(rivalInfo);
+    game.addPlayer(victimInfo);
+    const placer = game.player(placerInfo.id);
+    const rival = game.player(rivalInfo.id);
+    const victim = game.player(victimInfo.id);
+
+    game.addExecution(
+      new SpawnExecution(gameID, placerInfo, game.ref(2, 4)),
+      new SpawnExecution(gameID, rivalInfo, game.ref(2, 6)),
+      new SpawnExecution(gameID, victimInfo, game.ref(2, 8)),
+    );
+    game.executeNextTick();
+    game.executeNextTick();
+
+    // Rival stakes 5k, placer stakes 3k: pool 8k.
+    rival.addGold(20_000n);
+    placer.addGold(20_000n);
+    game.addExecution(new BountyExecution(rival, victimInfo.id, 5_000));
+    runTicks(game, 2);
+    game.addExecution(new BountyExecution(placer, victimInfo.id, 3_000));
+    runTicks(game, 2);
+    expect(game.bountyTotal(victim)).toBe(8_000n);
+
+    // The rival — a contributor — lands the killing blow: no payout, both
+    // stakes refunded, and the collected event carries amount 0 (voided).
+    const rivalGoldBefore = rival.gold();
+    const placerGoldBefore = placer.gold();
+    game.addExecution(new ConquerOnce(game, rival, victim));
+    const { collected } = runTicks(game, 2);
+
+    expect(game.bountyTotal(victim)).toBe(0n);
+    expect(rival.gold()).toBeGreaterThanOrEqual(rivalGoldBefore + 5_000n);
+    expect(placer.gold()).toBeGreaterThanOrEqual(placerGoldBefore + 3_000n);
+    expect(collected.length).toBe(1);
+    expect(collected[0].collectorId).toBe(rival.id());
+    expect(collected[0].amount).toBe(0n);
   });
 
   it("should burn a 10% fee and hide the placer on anonymous bounties", async () => {

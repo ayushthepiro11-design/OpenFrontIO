@@ -734,7 +734,9 @@
     "wants_to_renew_alliance": "{name} wants to renew your alliance",
     "bounty_on_you_anonymous": "Someone put a {gold} gold bounty on your head!",
     "bounty_placed_anonymous": "An anonymous benefactor put a {gold} gold bounty on {target}’s head (pool: {total})",
-    "bounty_expired": "The bounty on {target}’s head expired — stakes refunded"
+    "bounty_expired": "The bounty on {target}’s head expired — stakes refunded",
+    "bounty_voided": "{name} struck the killing blow on {target} but had contributed to the bounty — stakes refunded, no payout",
+    "bounty_voided_you": "You struck the killing blow on {target} but had contributed to the bounty — stakes refunded, no payout"
   },
   "featured_stream": {
     "expand": "Expand",

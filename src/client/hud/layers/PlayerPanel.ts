@@ -46,6 +46,7 @@ import "./PlayerModerationModal";
 import "./PlayerReportModal";
 import "./SendResourceModal";
 const allianceIcon = assetUrl("images/AllianceIconWhite.svg");
+const bountyIcon = assetUrl("images/GoldCoinIcon.svg");
 const chatIcon = assetUrl("images/ChatIconWhite.svg");
 const donateGoldIcon = assetUrl("images/DonateGoldIconWhite.svg");
 const donateTroopIcon = assetUrl("images/DonateTroopIconWhite.svg");
@@ -267,6 +268,12 @@ export class PlayerPanel extends LitElement implements Controller {
     this.sendMode = "gold";
   }
 
+  private openPlaceBounty(target: PlayerView) {
+    this.suppressNextHide = true;
+    this.sendTarget = target;
+    this.sendMode = "bounty";
+  }
+
   private handleDonateTroopClick(
     e: Event,
     myPlayer: PlayerView,
@@ -283,6 +290,15 @@ export class PlayerPanel extends LitElement implements Controller {
   ) {
     e.stopPropagation();
     this.openSendGold(other);
+  }
+
+  private handlePlaceBountyClick(
+    e: Event,
+    myPlayer: PlayerView,
+    other: PlayerView,
+  ) {
+    e.stopPropagation();
+    this.openPlaceBounty(other);
   }
 
   private closeSend = () => {
@@ -861,6 +877,7 @@ export class PlayerPanel extends LitElement implements Controller {
     const myPlayer = this.g.myPlayer();
     const canDonateGold = this.actions?.interaction?.canDonateGold;
     const canDonateTroops = this.actions?.interaction?.canDonateTroops;
+    const canPlaceBounty = this.actions?.interaction?.canPlaceBounty;
     const canSendAllianceRequest =
       this.actions?.interaction?.canSendAllianceRequest;
     const canSendEmoji =
@@ -920,6 +937,17 @@ export class PlayerPanel extends LitElement implements Controller {
                 iconAlt: "Gold",
                 title: translateText("player_panel.send_gold"),
                 label: translateText("player_panel.gold"),
+                type: "normal",
+              })
+            : ""}
+          ${canPlaceBounty && other !== my
+            ? actionButton({
+                onClick: (e: MouseEvent) =>
+                  this.handlePlaceBountyClick(e, my, other),
+                icon: bountyIcon,
+                iconAlt: "Bounty",
+                title: translateText("bounty.place_bounty"),
+                label: translateText("bounty.place_bounty"),
                 type: "normal",
               })
             : ""}

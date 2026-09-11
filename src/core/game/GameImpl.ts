@@ -1343,6 +1343,10 @@ export class GameImpl implements Game {
     // No bounties on the disconnected: they can't fight back, so the pool
     // would be free money for whoever reaches them first.
     if (target.isDisconnected()) return false;
+    // Tribes are beneath the market: mindless bot packs can neither post
+    // meaningful rivalries nor hold grudges — bounties are for players
+    // (humans) and nations only. Tribes can still collect as killers.
+    if (target.type() === PlayerType.Bot) return false;
     if (placer.isOnSameTeam(target)) return false;
     const last = this.lastBountyTick.get(`${placer.id()}:${target.id()}`);
     if (
@@ -1408,13 +1412,32 @@ export class GameImpl implements Game {
   resolveBounty(collector: Player, conquered: Player): void {
     const pool = this.bountyPools.get(conquered.id());
     if (!pool) return;
-    this.bountyPools.delete(conquered.id());
-    this.bountyDeadlines.delete(conquered.id());
 
     let total = 0n;
     for (const amount of pool.values()) total += amount;
-    if (total === 0n) return;
+    if (total === 0n) {
+      this.bountyPools.delete(conquered.id());
+      this.bountyDeadlines.delete(conquered.id());
+      return;
+    }
 
+    // Contributors cannot collect their own pool: a minimal stake must not
+    // launder the whole pool into the killer's pocket. Everyone (including
+    // the killer) is refunded instead, and the event carries amount 0 so
+    // the client renders the voided toast rather than a payout.
+    if (pool.has(collector.id())) {
+      this.refundBounties(conquered);
+      this.addUpdate({
+        type: GameUpdateType.BountyCollectedEvent,
+        collectorId: collector.id(),
+        targetId: conquered.id(),
+        amount: 0n,
+      });
+      return;
+    }
+
+    this.bountyPools.delete(conquered.id());
+    this.bountyDeadlines.delete(conquered.id());
     collector.addGold(total);
     this.addUpdate({
       type: GameUpdateType.BountyCollectedEvent,
