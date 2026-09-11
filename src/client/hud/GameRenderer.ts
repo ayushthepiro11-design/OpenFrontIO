@@ -126,12 +126,16 @@ export function createRenderer(
   actionableEvents.game = game;
   actionableEvents.uiState = uiState;
 
-  const bountyBoard = document.querySelector("bounty-board") as BountyBoard;
-  if (!(bountyBoard instanceof BountyBoard)) {
+  const bountyBoard = document.querySelector("bounty-board");
+  // Optional HUD panel: a missing board must never break game start (this
+  // exact crash once shipped when the template tag was accidentally
+  // reverted while the query stayed). Only wire + tick it when present.
+  if (bountyBoard instanceof BountyBoard) {
+    bountyBoard.eventBus = eventBus;
+    bountyBoard.game = game;
+  } else {
     console.error("bounty board not found");
   }
-  bountyBoard.eventBus = eventBus;
-  bountyBoard.game = game;
 
   const attacksDisplay = document.querySelector(
     "attacks-display",
@@ -340,7 +344,9 @@ export function createRenderer(
     ...(mapLayerController ? [mapLayerController] : []),
     eventsDisplay,
     actionableEvents,
-    bountyBoard,
+    // Bounty board is optional (see wiring above): only tick it when the
+    // template actually mounted one.
+    ...(bountyBoard instanceof BountyBoard ? [bountyBoard] : []),
     attacksDisplay,
     chatDisplay,
     buildMenu,
