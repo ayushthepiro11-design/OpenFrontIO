@@ -36,6 +36,7 @@ export default [
             "__mocks__/fileMock.js",
             "eslint.config.js",
             "scripts/sync-assets.mjs",
+            "scripts/validate-cosmetics.ts",
             "tests/matchmaking/*.mjs",
           ],
         },

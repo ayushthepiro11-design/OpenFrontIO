@@ -1,3 +1,4 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   cosmeticRelationship,
   crownRelationship,
@@ -201,6 +202,50 @@ describe("cosmeticRelationship", () => {
         makeUserMe(["crown:*"]),
       ),
     ).toBe("owned");
+  });
+
+  describe("desktop shell unlock", () => {
+    const SHELL = { version: async () => "test-shell" };
+
+    beforeEach(() => {
+      (window as any).openfrontDesktop = SHELL;
+    });
+
+    afterEach(() => {
+      delete (window as any).openfrontDesktop;
+    });
+
+    it("returns owned for guests with no flares inside the desktop shell", () => {
+      expect(
+        cosmeticRelationship(
+          {
+            wildcardFlare: "pattern:*",
+            requiredFlare: "pattern:stripes:red",
+            priceSoft: 100,
+            priceHard: undefined,
+            affiliateCode: null,
+            itemAffiliateCode: null,
+          },
+          false,
+        ),
+      ).toBe("owned");
+    });
+
+    it("returns owned for priced items inside the desktop shell", () => {
+      expect(
+        cosmeticRelationship(
+          {
+            wildcardFlare: "flag:*",
+            requiredFlare: "flag:cool",
+            priceSoft: 100,
+            priceHard: 50,
+            affiliateCode: "storeA",
+            itemAffiliateCode: "storeB",
+          },
+          makeUserMe([]),
+        ),
+      ).toBe("owned");
+    });
   });
 });
 

@@ -1,25 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" shape-rendering="geometricPrecision" image-rendering="optimizeQuality">
   <!--
-    Bounty (handshake) icon: two cuffed forearms clasping, thumb over the
-    top, four fingertips scalloping the lower edge. Built from round-capped
-    strokes so every joint is seamless; the finger gaps read via the
-    protruding tips, which is what survives at 20px HUD sizes.
+    Bounty icon (original design): a crosshair reticle with a gold coin
+    locked in the bullseye — "a price on someone's head". The ring, the
+    four cardinal ticks and the solid coin stay separated by clear gaps so
+    each element survives at 20px HUD sizes.
   -->
-  <g stroke="#fdfdfd" stroke-linecap="round" fill="none">
-    <!-- cuffs -->
-    <line x1="6" y1="21" x2="4" y2="38" stroke-width="8"/>
-    <line x1="51" y1="6" x2="60" y2="17" stroke-width="8"/>
-    <!-- forearms -->
-    <line x1="7" y1="30" x2="26" y2="29" stroke-width="11"/>
-    <line x1="57" y1="12" x2="41" y2="25" stroke-width="11"/>
-    <!-- palm mass -->
-    <line x1="26" y1="29" x2="39" y2="33" stroke-width="14"/>
-    <!-- thumb over the top -->
-    <line x1="21" y1="26" x2="33" y2="17" stroke-width="7"/>
-    <!-- fingers -->
-    <line x1="25" y1="36" x2="20" y2="47" stroke-width="5"/>
-    <line x1="30" y1="37" x2="25" y2="48.5" stroke-width="5"/>
-    <line x1="35" y1="38" x2="30" y2="49.5" stroke-width="5"/>
-    <line x1="40" y1="38.5" x2="35.5" y2="50" stroke-width="5"/>
+  <!-- reticle ring -->
+  <circle cx="32" cy="32" r="19" fill="none" stroke="#fdfdfd" stroke-width="6"/>
+  <!-- cardinal ticks (inner r=24, outer r=28.5) -->
+  <g stroke="#fdfdfd" stroke-width="4" stroke-linecap="round">
+    <line x1="32" y1="8" x2="32" y2="3.5"/>
+    <line x1="32" y1="56" x2="32" y2="60.5"/>
+    <line x1="8" y1="32" x2="3.5" y2="32"/>
+    <line x1="56" y1="32" x2="60.5" y2="32"/>
   </g>
+  <!-- the price: solid coin in the bullseye -->
+  <circle cx="32" cy="32" r="9" fill="#fdfdfd"/>
 </svg>

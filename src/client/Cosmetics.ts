@@ -30,6 +30,7 @@ import {
   purchaseCosmeticPack,
   purchaseWithCurrency,
 } from "./Api";
+import { isDesktopShell } from "./DesktopShell";
 import { showInGameAlert, showInGameConfirm } from "./InGameModal";
 import {
   classifyPurchaseReturn,
@@ -722,12 +723,12 @@ export async function fetchCosmetics(): Promise<Cosmetics | null> {
       });
       if (!response.ok) {
         console.error(`HTTP error! status: ${response.status}`);
-        return null;
+        return await fetchBundledCosmetics();
       }
       const result = CosmeticsSchema.safeParse(await response.json());
       if (!result.success) {
         console.error(`Invalid cosmetics: ${result.error.message}`);
-        return null;
+        return await fetchBundledCosmetics();
       }
       const patternKeys = Object.keys(result.data.patterns).sort();
       const hashInput = patternKeys.join(",");
@@ -736,7 +737,7 @@ export async function fetchCosmetics(): Promise<Cosmetics | null> {
       return result.data;
     } catch (error) {
       console.error("Error getting cosmetics:", error);
-      return null;
+      return await fetchBundledCosmetics();
     }
   })();
   __cosmetics = request;
@@ -763,6 +764,31 @@ export function prewarmCosmetics(): Promise<void> {
     () => undefined,
     () => undefined,
   );
+}
+
+// Offline fallback: a snapshot of the live catalog bundled with the client
+// (resources/cosmetics.json, code-split so web users never download it
+// unless the API is unreachable). This is what makes territory skins work
+// with zero internet.
+async function fetchBundledCosmetics(): Promise<Cosmetics | null> {
+  try {
+    const mod = await import("resources/cosmetics.json");
+    const result = CosmeticsSchema.safeParse(mod.default ?? mod);
+    if (!result.success) {
+      console.error(`Invalid bundled cosmetics: ${result.error.message}`);
+      return null;
+    }
+    const patternKeys = Object.keys(result.data.patterns).sort();
+    __cosmeticsHash = simpleHash(patternKeys.join(","));
+    __cosmeticsCache = result.data;
+    console.log(
+      `Loaded bundled cosmetics fallback (${patternKeys.length} patterns)`,
+    );
+    return result.data;
+  } catch (error) {
+    console.error("Error loading bundled cosmetics:", error);
+    return null;
+  }
 }
 
 export async function resolveFlagUrl(
@@ -797,6 +823,12 @@ export function cosmeticRelationship(
   },
   userMeResponse: UserMeResponse | false,
 ): "owned" | "purchasable" | "blocked" {
+  // The offline desktop shell ships no shop and no accounts: the bundled
+  // fallback catalog IS the whole economy there, so everything in it is
+  // owned. Web behavior is untouched (guests still see locked items).
+  if (isDesktopShell()) {
+    return "owned";
+  }
   const flares =
     userMeResponse === false ? [] : (userMeResponse.player.flares ?? []);
 
@@ -828,6 +860,9 @@ export function patternRelationship(
 ): "owned" | "purchasable" | "blocked" {
   if (colorPalette === null) {
     // For backwards compatibility only show non-colored patterns if they are owned.
+    if (isDesktopShell()) {
+      return "owned";
+    }
     const flares =
       userMeResponse === false ? [] : (userMeResponse.player.flares ?? []);
     if (
@@ -841,6 +876,9 @@ export function patternRelationship(
 
   if (colorPalette.isArchived) {
     // Check ownership first — if owned, show it even if archived.
+    if (isDesktopShell()) {
+      return "owned";
+    }
     const flares =
       userMeResponse === false ? [] : (userMeResponse.player.flares ?? []);
     if (

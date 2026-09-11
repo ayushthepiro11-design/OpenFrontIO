@@ -76,6 +76,18 @@
   if (!bountyPath) throw new Error("no enemy tile found with an enabled bounty slice");
   log("bounty slice found");
 
+  // Wheel composition: the same open menu must also offer attack (sword)
+  // and boat (sail) slices — bounty rides alongside, never instead.
+  const sliceIds = [...new Set(
+    [...document.querySelectorAll('g.menu-item-content[data-id]')]
+      .map((g) => g.getAttribute("data-id")),
+  )];
+  log("wheel slices: " + sliceIds.join(","));
+  for (const need of ["attack", "boat", "place_bounty"]) {
+    const hasIt = sliceIds.some((id) => id && id.includes(need));
+    if (!hasIt) throw new Error("wheel missing slice: " + need);
+  }
+
   // 4. Click the bounty slice -> SendResourceModal opens in bounty mode.
   bountyPath.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
   await sleep(800);
