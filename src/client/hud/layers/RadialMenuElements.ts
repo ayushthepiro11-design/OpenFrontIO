@@ -627,7 +627,9 @@ const donateGoldRadialElement: MenuElement = {
 const placeBountyElement: MenuElement = {
   id: "place_bounty",
   name: "place_bounty",
-  text: translateText("bounty.place_bounty"),
+  // NOTE: no `text` property — when both text and icon are set the renderer
+  // draws text instead of the icon image (and module-load translateText
+  // would freeze the raw key). Icon-only, like the sword/boat slices.
   disabled: (params: MenuElementParams) =>
     params.game.inSpawnPhase() ||
     !params.playerActions?.interaction?.canPlaceBounty,
