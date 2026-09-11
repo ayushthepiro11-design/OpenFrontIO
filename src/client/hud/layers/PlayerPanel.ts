@@ -46,7 +46,7 @@ import "./PlayerModerationModal";
 import "./PlayerReportModal";
 import "./SendResourceModal";
 const allianceIcon = assetUrl("images/AllianceIconWhite.svg");
-const bountyIcon = assetUrl("images/GoldCoinIcon.svg");
+const bountyIcon = assetUrl("images/BountyIconWhite.svg");
 const chatIcon = assetUrl("images/ChatIconWhite.svg");
 const donateGoldIcon = assetUrl("images/DonateGoldIconWhite.svg");
 const donateTroopIcon = assetUrl("images/DonateTroopIconWhite.svg");
@@ -669,6 +669,7 @@ export class PlayerPanel extends LitElement implements Controller {
             shadow-[inset_0_0_8px_rgba(245,158,11,0.12)]"
           title=${translateText("bounty.badge_title")}
         >
+          <img src=${bountyIcon} alt="" aria-hidden="true" class="size-4.5" />
           <span class="tracking-tight"
             >${translateText("bounty.badge_label", {
               gold: renderNumber(total),

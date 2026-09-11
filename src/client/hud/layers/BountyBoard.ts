@@ -1,10 +1,13 @@
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { assetUrl } from "../../../core/AssetUrls";
 import { EventBus } from "../../../core/EventBus";
 import { Controller } from "../../Controller";
 import { GoToPlayerEvent } from "../../TransformHandler";
 import { renderNumber, translateText } from "../../Utils";
 import { GameView, PlayerView } from "../../view";
+
+const bountyIcon = assetUrl("images/BountyIconWhite.svg");
 
 interface BountyRow {
   player: PlayerView;
@@ -81,9 +84,17 @@ export class BountyBoard extends LitElement implements Controller {
                 @click=${() => this.focusPlayer(row.player)}
                 title=${row.player.displayName()}
               >
-                <span class="truncate max-w-[10rem]"
-                  >${row.player.displayName()}</span
-                >
+                <span class="flex items-center gap-1.5 min-w-0">
+                  <img
+                    src=${bountyIcon}
+                    alt=""
+                    aria-hidden="true"
+                    class="size-4 shrink-0"
+                  />
+                  <span class="truncate max-w-[10rem]"
+                    >${row.player.displayName()}</span
+                  >
+                </span>
                 <span
                   translate="no"
                   class="tabular-nums font-semibold text-amber-200"

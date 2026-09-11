@@ -23,7 +23,7 @@ const playerStatsRegularIcon = assetUrl(
 const playerStatsSolidIcon = assetUrl("images/LeaderboardIconSolidWhite.svg");
 const teamStatsRegularIcon = assetUrl("images/TeamIconRegularWhite.svg");
 const teamStatsSolidIcon = assetUrl("images/TeamIconSolidWhite.svg");
-const bountyBoardIcon = assetUrl("images/TargetIconWhite.svg");
+const bountyBoardIcon = assetUrl("images/BountyIconWhite.svg");
 
 @customElement("game-left-sidebar")
 export class GameLeftSidebar extends LitElement implements Controller {

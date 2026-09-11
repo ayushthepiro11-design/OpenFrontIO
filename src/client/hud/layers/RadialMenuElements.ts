@@ -31,6 +31,7 @@ import {
 } from "../../Transport";
 const allianceIcon = assetUrl("images/AllianceIconWhite.svg");
 const boatIcon = assetUrl("images/BoatIconWhite.svg");
+const bountyIcon = assetUrl("images/BountyIconWhite.svg");
 const buildIcon = assetUrl("images/BuildIconWhite.svg");
 const chatIcon = assetUrl("images/ChatIconWhite.svg");
 const donateGoldIcon = assetUrl("images/DonateGoldIconWhite.svg");
@@ -630,7 +631,7 @@ const placeBountyElement: MenuElement = {
   disabled: (params: MenuElementParams) =>
     params.game.inSpawnPhase() ||
     !params.playerActions?.interaction?.canPlaceBounty,
-  icon: traitorIcon,
+  icon: bountyIcon,
   color: "#ef4444",
   action: (params: MenuElementParams) => {
     if (!params.selected) return;
