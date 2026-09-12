@@ -169,7 +169,10 @@ function renderIndexHtml(): string {
     // empty, same-origin.
     cdnBaseRaw: "",
     gameEnv: JSON.stringify("dev"),
-    numWorkers: JSON.stringify(1),
+    cluster: JSON.stringify({
+      a: { host: "localhost", color: "blue", numWorkers: 1 },
+    }),
+    instanceLetter: JSON.stringify("a"),
     turnstileSiteKey: JSON.stringify(""),
     jwtAudience: JSON.stringify("localhost"),
     instanceId: JSON.stringify("desktop"),
@@ -276,9 +279,9 @@ function createWindow(): void {
     return handleAppRequest(request);
   });
 
-  async function handleAppRequest(request: Parameters<
-    Parameters<typeof protocol.handle>[1]
-  >[0]): Promise<Response> {
+  async function handleAppRequest(
+    request: Parameters<Parameters<typeof protocol.handle>[1]>[0],
+  ): Promise<Response> {
     const url = new URL(request.url);
     const pathname = decodeURIComponent(url.pathname);
     if (pathname === "/" || pathname === "/index.html") {
@@ -342,16 +345,13 @@ function createWindow(): void {
   // Diagnostics also used by the smoke test. Errors and SMOKE_ markers are
   // always logged (when a log file was requested); everything else only in
   // verbose mode, and never more than a bounded number of lines.
-  mainWindow.webContents.on(
-    "console-message",
-    (_event, level, message) => {
-      if (message.includes("SMOKE_")) {
-        log(message);
-      } else if (level >= 2 || verbose) {
-        log(`CONSOLE[${level}]: ${message.slice(0, 500)}`);
-      }
-    },
-  );
+  mainWindow.webContents.on("console-message", (_event, level, message) => {
+    if (message.includes("SMOKE_")) {
+      log(message);
+    } else if (level >= 2 || verbose) {
+      log(`CONSOLE[${level}]: ${message.slice(0, 500)}`);
+    }
+  });
   mainWindow.webContents.on("did-finish-load", () => {
     log("MAIN: did-finish-load");
   });
