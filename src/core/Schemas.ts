@@ -42,6 +42,7 @@ export type Intent =
   | TargetPlayerIntent
   | EmojiIntent
   | DonateGoldIntent
+  | PlaceBountyIntent
   | DonateTroopsIntent
   | BuildUnitIntent
   | EmbargoIntent
@@ -68,6 +69,7 @@ export type BreakAllianceIntent = z.infer<typeof BreakAllianceIntentSchema>;
 export type TargetPlayerIntent = z.infer<typeof TargetPlayerIntentSchema>;
 export type EmojiIntent = z.infer<typeof EmojiIntentSchema>;
 export type DonateGoldIntent = z.infer<typeof DonateGoldIntentSchema>;
+export type PlaceBountyIntent = z.infer<typeof PlaceBountyIntentSchema>;
 export type DonateTroopsIntent = z.infer<typeof DonateTroopIntentSchema>;
 export type EmbargoIntent = z.infer<typeof EmbargoIntentSchema>;
 export type BuildUnitIntent = z.infer<typeof BuildUnitIntentSchema>;
@@ -528,6 +530,10 @@ export const GameConfigSchema = z.object({
   // that only know publicIds at create_game); resolved to clientID at lookup.
   nameRevealPublicIds: z.string().array().max(200).optional(),
   waterNukes: z.boolean().nullable().optional(),
+  // Bounty market: players pool gold bounties on other players; whoever
+  // lands the killing blow (conquerPlayer) collects the pool. Defaults off;
+  // the solo modal turns it on.
+  bountiesEnabled: z.boolean().nullable().optional(),
   randomSpawn: z.boolean(),
   maxPlayers: zb.uint().optional(),
   // OFM: allowlist of publicIds allowed to join (admin-only, see create_game).
@@ -680,6 +686,15 @@ export const DonateGoldIntentSchema = z.object({
   gold: zb.float({ min: 0 }).nullable(),
 });
 
+export const PlaceBountyIntentSchema = z.object({
+  type: z.literal("place_bounty"),
+  recipient: MappedID,
+  gold: zb.float({ min: 0 }).nullable(),
+  // Anonymous placements hide the placer from the bounty toast for a 10%
+  // burn fee. Optional so older clients/servers keep working.
+  anonymous: z.boolean().optional(),
+});
+
 export const DonateTroopIntentSchema = z.object({
   type: z.literal("donate_troops"),
   recipient: MappedID,
@@ -776,6 +791,7 @@ export const IntentSchema = z.discriminatedUnion("type", [
   TargetPlayerIntentSchema,
   EmojiIntentSchema,
   DonateGoldIntentSchema,
+  PlaceBountyIntentSchema,
   DonateTroopIntentSchema,
   BuildUnitIntentSchema,
   UpgradeStructureIntentSchema,

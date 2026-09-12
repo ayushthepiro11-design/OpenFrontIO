@@ -7,6 +7,9 @@ import { AllPlayers, MessageType } from "../../../core/game/Game";
 import {
   AllianceExpiredUpdate,
   AllianceRequestReplyUpdate,
+  BountyCollectedUpdate,
+  BountyExpiredUpdate,
+  BountyPlacedUpdate,
   BrokeAllianceUpdate,
   DisplayChatMessageUpdate,
   DisplayMessageUpdate,
@@ -139,6 +142,12 @@ export class EventsDisplay extends LitElement implements Controller {
     [GameUpdateType.UnitIncoming, this.onUnitIncomingEvent.bind(this)],
     [GameUpdateType.AllianceExpired, this.onAllianceExpiredEvent.bind(this)],
     [GameUpdateType.DonateEvent, this.onDonateEvent.bind(this)],
+    [GameUpdateType.BountyPlacedEvent, this.onBountyPlacedEvent.bind(this)],
+    [
+      GameUpdateType.BountyCollectedEvent,
+      this.onBountyCollectedEvent.bind(this),
+    ],
+    [GameUpdateType.BountyExpiredEvent, this.onBountyExpiredEvent.bind(this)],
   ] as const;
 
   constructor() {
@@ -486,6 +495,125 @@ export class EventsDisplay extends LitElement implements Controller {
       highlight: true,
       createdAt: this.game.ticks(),
       focusID: other.smallID(),
+    });
+  }
+
+  // Bounty market: a bounty is market news for everyone (unlike donations,
+  // which only notify sender/recipient) — the whole point is a public hit.
+  onBountyPlacedEvent(update: BountyPlacedUpdate) {
+    const myPlayer = this.game.myPlayer();
+    if (!myPlayer) return;
+
+    const target = this.game.player(update.targetId) as PlayerView;
+    const placer = this.game.player(update.placerId) as PlayerView;
+    if (!target || !placer) return;
+
+    const isTarget = update.targetId === myPlayer.id();
+    const isPlacer = update.placerId === myPlayer.id();
+
+    this.addEvent({
+      description: isTarget
+        ? translateText(
+            update.anonymous
+              ? "events_display.bounty_on_you_anonymous"
+              : "events_display.bounty_on_you",
+            update.anonymous
+              ? { gold: renderNumber(update.amount) }
+              : {
+                  name: placer.displayName(),
+                  gold: renderNumber(update.amount),
+                },
+          )
+        : translateText(
+            update.anonymous
+              ? "events_display.bounty_placed_anonymous"
+              : "events_display.bounty_placed",
+            update.anonymous
+              ? {
+                  target: target.displayName(),
+                  gold: renderNumber(update.amount),
+                  total: renderNumber(update.totalPool),
+                }
+              : {
+                  placer: placer.displayName(),
+                  target: target.displayName(),
+                  gold: renderNumber(update.amount),
+                  total: renderNumber(update.totalPool),
+                },
+          ),
+      type: MessageType.BOUNTY_PLACED,
+      highlight: true,
+      createdAt: this.game.ticks(),
+      focusID: target.smallID(),
+    });
+    if (isPlacer) {
+      this.eventBus.emit(new PlaySoundEffectEvent("ka-ching"));
+    }
+  }
+
+  onBountyCollectedEvent(update: BountyCollectedUpdate) {
+    const myPlayer = this.game.myPlayer();
+    if (!myPlayer) return;
+
+    const collector = this.game.player(update.collectorId) as PlayerView;
+    const target = this.game.player(update.targetId) as PlayerView;
+    if (!collector || !target) return;
+
+    // amount 0 means the collector had contributed to the pool:
+    // contributors can't collect — everyone was refunded instead.
+    if (update.amount === 0n) {
+      this.addEvent({
+        description:
+          update.collectorId === myPlayer.id()
+            ? translateText("events_display.bounty_voided_you", {
+                target: target.displayName(),
+              })
+            : translateText("events_display.bounty_voided", {
+                name: collector.displayName(),
+                target: target.displayName(),
+              }),
+        type: MessageType.BOUNTY_COLLECTED,
+        highlight: true,
+        createdAt: this.game.ticks(),
+        focusID: collector.smallID(),
+      });
+      return;
+    }
+
+    this.addEvent({
+      description:
+        update.collectorId === myPlayer.id()
+          ? translateText("events_display.bounty_collected_you", {
+              target: target.displayName(),
+              gold: renderNumber(update.amount),
+            })
+          : translateText("events_display.bounty_collected", {
+              name: collector.displayName(),
+              target: target.displayName(),
+              gold: renderNumber(update.amount),
+            }),
+      type: MessageType.BOUNTY_COLLECTED,
+      highlight: true,
+      createdAt: this.game.ticks(),
+      focusID: collector.smallID(),
+    });
+  }
+
+  onBountyExpiredEvent(update: BountyExpiredUpdate) {
+    const myPlayer = this.game.myPlayer();
+    if (!myPlayer) return;
+
+    const target = this.game.player(update.targetId) as PlayerView;
+    if (!target) return;
+
+    this.addEvent({
+      description: translateText("events_display.bounty_expired", {
+        target: target.displayName(),
+      }),
+      type: MessageType.BOUNTY_EXPIRED,
+      highlight: false,
+      createdAt: this.game.ticks(),
+      focusID: target.smallID(),
     });
   }
 

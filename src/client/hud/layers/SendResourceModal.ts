@@ -5,6 +5,7 @@ import { within } from "../../../core/Util";
 import {
   SendDonateGoldIntentEvent,
   SendDonateTroopsIntentEvent,
+  SendPlaceBountyIntentEvent,
 } from "../../Transport";
 import { UIState } from "../../UIState";
 import { renderTroops, translateText } from "../../Utils";
@@ -15,7 +16,10 @@ export class SendResourceModal extends LitElement {
   @property({ attribute: false }) eventBus: EventBus | null = null;
 
   @property({ type: Boolean }) open: boolean = false;
-  @property({ type: String }) mode: "troops" | "gold" = "troops";
+  // "bounty" shares gold's slider behavior (percent of my gold, no
+  // recipient capacity) but emits a place-bounty intent and wears a
+  // hostile red color so it reads as a hit, not a gift.
+  @property({ type: String }) mode: "troops" | "gold" | "bounty" = "troops";
 
   @property({ type: Object }) total: number | bigint = 0;
   @property({ type: Object }) uiState: UIState | null = null; // to seed initial %
@@ -29,6 +33,7 @@ export class SendResourceModal extends LitElement {
 
   @state() private sendAmount: number = 0;
   @state() private selectedPercent: number | null = null;
+  @state() private anonymous: boolean = false;
 
   private PRESETS = [10, 25, 50, 75, 100] as const;
 
@@ -80,6 +85,7 @@ export class SendResourceModal extends LitElement {
   }
 
   private closeModal() {
+    this.anonymous = false;
     this.dispatchEvent(new CustomEvent("close"));
   }
 
@@ -98,6 +104,12 @@ export class SendResourceModal extends LitElement {
       const myTroops = Number(myPlayer.troops());
       if (amount > myTroops) return;
       this.eventBus.emit(new SendDonateTroopsIntentEvent(target, amount));
+    } else if (this.mode === "bounty") {
+      const myGold = Number(myPlayer.gold());
+      if (amount > myGold) return;
+      this.eventBus.emit(
+        new SendPlaceBountyIntentEvent(target, BigInt(amount), this.anonymous),
+      );
     } else {
       const myGold = Number(myPlayer.gold());
       if (amount > myGold) return;
@@ -178,7 +190,9 @@ export class SendResourceModal extends LitElement {
   private getFillColor(): string {
     return this.mode === "troops"
       ? "rgb(168 85 247)" /* purple */
-      : "rgb(234 179 8)" /* amber */;
+      : this.mode === "bounty"
+        ? "rgb(239 68 68)" /* red */
+        : "rgb(234 179 8)" /* amber */;
   }
 
   private getMinKeepRatio(): number {
@@ -414,6 +428,30 @@ export class SendResourceModal extends LitElement {
     </p>`;
   }
 
+  // Bounty only: hide the placer's name from the bounty toast for a 10%
+  // burn fee. Reset whenever the modal opens in another mode.
+  private renderAnonymousToggle() {
+    if (this.mode !== "bounty") return html``;
+    return html`
+      <label
+        class="mt-3 flex items-center gap-2 cursor-pointer select-none text-sm text-zinc-300"
+      >
+        <input
+          type="checkbox"
+          class="size-4 accent-red-500"
+          ?checked=${this.anonymous}
+          @change=${(e: Event) => {
+            this.anonymous = (e.target as HTMLInputElement).checked;
+          }}
+        />
+        <span>${translateText("bounty.anonymous_label")}</span>
+        <span class="text-xs text-zinc-500"
+          >${translateText("bounty.anonymous_fee_note")}</span
+        >
+      </label>
+    `;
+  }
+
   private renderSummary(allowed: number) {
     const total = this.getTotalNumber();
     const keep = this.keepAfter(allowed);
@@ -562,8 +600,8 @@ export class SendResourceModal extends LitElement {
             ${this.mode === "troops"
               ? this.renderCapacityNote(allowed)
               : html``}
-            ${this.renderSummary(allowed)} ${this.renderActions()}
-            ${this.renderSliderStyles()}
+            ${this.renderAnonymousToggle()} ${this.renderSummary(allowed)}
+            ${this.renderActions()} ${this.renderSliderStyles()}
           </div>
         </div>
       </div>

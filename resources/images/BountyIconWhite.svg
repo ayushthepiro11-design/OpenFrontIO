@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" shape-rendering="geometricPrecision" image-rendering="optimizeQuality">
+  <!--
+    Bounty icon (original design): a crosshair reticle with a gold coin
+    locked in the bullseye — "a price on someone's head". The ring, the
+    four cardinal ticks and the solid coin stay separated by clear gaps so
+    each element survives at 20px HUD sizes.
+  -->
+  <!-- reticle ring -->
+  <circle cx="32" cy="32" r="19" fill="none" stroke="#fdfdfd" stroke-width="6"/>
+  <!-- cardinal ticks (inner r=24, outer r=28.5) -->
+  <g stroke="#fdfdfd" stroke-width="4" stroke-linecap="round">
+    <line x1="32" y1="8" x2="32" y2="3.5"/>
+    <line x1="32" y1="56" x2="32" y2="60.5"/>
+    <line x1="8" y1="32" x2="3.5" y2="32"/>
+    <line x1="56" y1="32" x2="60.5" y2="32"/>
+  </g>
+  <!-- the price: solid coin in the bullseye -->
+  <circle cx="32" cy="32" r="9" fill="#fdfdfd"/>
+</svg>

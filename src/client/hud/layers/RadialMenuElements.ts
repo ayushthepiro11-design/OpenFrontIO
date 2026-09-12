@@ -31,6 +31,7 @@ import {
 } from "../../Transport";
 const allianceIcon = assetUrl("images/AllianceIconWhite.svg");
 const boatIcon = assetUrl("images/BoatIconWhite.svg");
+const bountyIcon = assetUrl("images/BountyIconWhite.svg");
 const buildIcon = assetUrl("images/BuildIconWhite.svg");
 const chatIcon = assetUrl("images/ChatIconWhite.svg");
 const donateGoldIcon = assetUrl("images/DonateGoldIconWhite.svg");
@@ -620,6 +621,30 @@ const donateGoldRadialElement: MenuElement = {
   },
 };
 
+// Bounty market: pool gold on the selected player's head. Opens the shared
+// SendResourceModal in "bounty" mode (percent-of-my-gold presets, hostile-red
+// styling); the core gates real validity (cooldown, self/team, config flag).
+const placeBountyElement: MenuElement = {
+  id: "place_bounty",
+  name: "place_bounty",
+  // NOTE: no `text` property — when both text and icon are set the renderer
+  // draws text instead of the icon image (and module-load translateText
+  // would freeze the raw key). Icon-only, like the sword/boat slices.
+  disabled: (params: MenuElementParams) =>
+    params.game.inSpawnPhase() ||
+    !params.playerActions?.interaction?.canPlaceBounty,
+  icon: bountyIcon,
+  color: "#ef4444",
+  action: (params: MenuElementParams) => {
+    if (!params.selected) return;
+    params.playerPanel.openPlaceBountyModal(
+      params.playerActions,
+      params.tile,
+      params.selected,
+    );
+  },
+};
+
 export const deleteUnitElement: MenuElement = {
   id: Slot.Delete,
   name: "delete",
@@ -811,6 +836,9 @@ export const rootMenuElement: MenuElement = {
             showDonateInsteadOfAttack
               ? donateGoldRadialElement
               : attackMenuElement,
+            // Bounty menu is only available on enemy territory: the disabled
+            // gate also enforces the core rules (config, cooldown, teams).
+            placeBountyElement,
           ]),
     ];
 

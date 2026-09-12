@@ -9,6 +9,8 @@ import { Platform } from "../../Platform";
 import { themeProvider } from "../../theme/ThemeProvider";
 import { getTranslatedPlayerTeamLabel, translateText } from "../../Utils";
 import type { GameView } from "../../view";
+import "./BountyBoard";
+import type { BountyBoard } from "./BountyBoard";
 import { ImmunityBarVisibleEvent } from "./ImmunityTimer";
 import "./PlayerStats";
 import type { PlayerStats } from "./PlayerStats";
@@ -21,6 +23,7 @@ const playerStatsRegularIcon = assetUrl(
 const playerStatsSolidIcon = assetUrl("images/LeaderboardIconSolidWhite.svg");
 const teamStatsRegularIcon = assetUrl("images/TeamIconRegularWhite.svg");
 const teamStatsSolidIcon = assetUrl("images/TeamIconSolidWhite.svg");
+const bountyBoardIcon = assetUrl("images/BountyIconWhite.svg");
 
 @customElement("game-left-sidebar")
 export class GameLeftSidebar extends LitElement implements Controller {
@@ -28,6 +31,8 @@ export class GameLeftSidebar extends LitElement implements Controller {
   private isPlayerStatsShown = false;
   @state()
   private isTeamStatsShown = false;
+  @state()
+  private isBountyBoardShown = false;
   @state()
   private isVisible = false;
   @state()
@@ -44,6 +49,7 @@ export class GameLeftSidebar extends LitElement implements Controller {
   @property({ attribute: false }) public eventBus: EventBus | null = null;
   @query("player-stats") private playerStats?: PlayerStats;
   @query("team-stats") private teamStats?: TeamStats;
+  @query("bounty-board") private bountyBoard?: BountyBoard;
   private showPlayerStatsAfterSpawn = false;
 
   createRenderRoot() {
@@ -103,6 +109,10 @@ export class GameLeftSidebar extends LitElement implements Controller {
 
   private toggleTeamStats(): void {
     this.isTeamStatsShown = !this.isTeamStatsShown;
+  }
+
+  private toggleBountyBoard(): void {
+    this.isBountyBoardShown = !this.isBountyBoardShown;
   }
 
   private get isTeamGame(): boolean {
@@ -171,6 +181,26 @@ export class GameLeftSidebar extends LitElement implements Controller {
                 </div>
               `
             : null}
+          <div
+            class="cursor-pointer p-0.5 bg-gray-700/50 hover:bg-gray-600 border rounded-md border-slate-500 transition-colors"
+            @click=${this.toggleBountyBoard}
+            role="button"
+            tabindex="0"
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.key === "Enter" || e.key === " " || e.code === "Space") {
+                e.preventDefault();
+                this.toggleBountyBoard();
+              }
+            }}
+          >
+            <img
+              src=${bountyBoardIcon}
+              alt=${translateText("bounty.board_title")}
+              width="20"
+              height="20"
+              class=${this.isBountyBoardShown ? "" : "opacity-50"}
+            />
+          </div>
           ${this.isPlayerStatsShown || this.isTeamStatsShown
             ? html`<span
                 class="ml-auto text-[10px] text-slate-500 select-all leading-none self-start"
@@ -213,6 +243,9 @@ export class GameLeftSidebar extends LitElement implements Controller {
             .game=${this.game}
             .visible=${this.isTeamStatsShown && this.isTeamGame}
           ></team-stats>
+          <bounty-board
+            class=${this.isBountyBoardShown ? "block min-w-0" : "hidden"}
+          ></bounty-board>
         </div>
         <slot></slot>
       </aside>
