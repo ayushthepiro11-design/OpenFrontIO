@@ -313,6 +313,7 @@ export const GameInfoSchema = z.object({
   clients: z.array(ClientInfoSchema).optional(),
   lobbyCreatorClientID: z.string().optional(),
   startsAt: zb.uint().optional(),
+  gracePeriodUntil: zb.uint().optional(),
   serverTime: zb.uint(),
   gameConfig: z.lazy(() => GameConfigSchema).optional(),
   publicGameType: PublicGameTypeSchema.optional(),

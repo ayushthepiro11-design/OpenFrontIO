@@ -1513,11 +1513,14 @@ export class GameServer {
       return GamePhase.Finished;
     }
 
-    const lessThanLifetime = this.startsAt ? Date.now() < this.startsAt : true;
+    const gracePeriodActive = this.gracePeriodUntil
+      ? now < this.gracePeriodUntil
+      : false;
+    const lessThanLifetime = this.startsAt ? now < this.startsAt : true;
     if (
-      lessThanLifetime &&
       !this.hasStarted() &&
-      !this.hasReachedMaxPlayerCount
+      ((lessThanLifetime && !this.hasReachedMaxPlayerCount) ||
+        gracePeriodActive)
     ) {
       return GamePhase.Lobby;
     }
@@ -1576,6 +1579,7 @@ export class GameServer {
       lobbyCreatorClientID: this.lobbyCreatorID,
       gameConfig: this.gameConfig,
       startsAt: this.startsAt,
+      gracePeriodUntil: this.gracePeriodUntil,
       serverTime: Date.now(),
       publicGameType: this.publicGameType,
       listed: this.isPublic() ? undefined : this.listing.isListed(),
@@ -1655,7 +1659,13 @@ export class GameServer {
     this.log.info("listed lobby reached auto-start deadline, starting", {
       gameID: this.id,
     });
-    this.setStartsAt(Date.now() + (this.gameConfig.startDelay ?? 0) * 1000);
+    const requestedStart =
+      Date.now() + (this.gameConfig.startDelay ?? 0) * 1000;
+    this.setStartsAt(
+      this.gracePeriodUntil
+        ? Math.max(requestedStart, this.gracePeriodUntil)
+        : requestedStart,
+    );
   }
 
   // Whether joining is restricted to an allowlist of publicIds. A lobby with

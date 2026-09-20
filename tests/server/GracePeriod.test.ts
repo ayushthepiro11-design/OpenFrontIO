@@ -13,8 +13,8 @@ describe("Rule change grace period", () => {
   it("applies a 30-second grace period when a private lobby changes rules", () => {
     const game = makeGame();
     // Two players
-    const host = makeClient(1, "host-id");
-    const joiner = makeClient(2, "joiner-id");
+    const host = makeClient({ persistentID: "host-id" });
+    const joiner = makeClient({ persistentID: "joiner-id" });
     game.joinClient(host);
     game.joinClient(joiner);
 
@@ -40,8 +40,8 @@ describe("Rule change grace period", () => {
 
   it("does not apply grace period if it is only cosmetic", () => {
     const game = makeGame();
-    const host = makeClient(1, "host-id");
-    const joiner = makeClient(2, "joiner-id");
+    const host = makeClient({ persistentID: "host-id" });
+    const joiner = makeClient({ persistentID: "joiner-id" });
     game.joinClient(host);
     game.joinClient(joiner);
 
@@ -68,8 +68,8 @@ describe("Rule change grace period", () => {
 
   it("extends an existing short timer if a rule is changed", () => {
     const game = makeGame();
-    const host = makeClient(1, "host-id");
-    const joiner = makeClient(2, "joiner-id");
+    const host = makeClient({ persistentID: "host-id" });
+    const joiner = makeClient({ persistentID: "joiner-id" });
     game.joinClient(host);
     game.joinClient(joiner);
 
@@ -95,8 +95,8 @@ describe("Rule change grace period", () => {
 
   it("respects the grace period when host presses start manually", () => {
     const game = makeGame();
-    const host = makeClient(1, "host-id");
-    const joiner = makeClient(2, "joiner-id");
+    const host = makeClient({ persistentID: "host-id" });
+    const joiner = makeClient({ persistentID: "joiner-id" });
     game.joinClient(host);
     game.joinClient(joiner);
 
@@ -121,7 +121,7 @@ describe("Rule change grace period", () => {
 });
 it("does not apply grace period to single player lobbies", () => {
   const game = makeGame();
-  const host = makeClient(1, "host-id");
+  const host = makeClient({ persistentID: "host-id" });
   game.joinClient(host);
   // joiner is missing, only host is present
 

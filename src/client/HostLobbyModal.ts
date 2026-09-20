@@ -107,6 +107,7 @@ export class HostLobbyModal extends BaseModal {
   @state() private hostCheatStartingGoldValue: number | undefined = undefined;
   @state() private lobbyCreatorClientID: string = "";
   @state() private lobbyStartAt: number | null = null;
+  @state() private gracePeriodUntil: number | null = null;
   @state() private serverTimeOffset: number = 0;
   // Whether this user may actually make the lobby public (the API's
   // canCreatePublicLobbies entitlement, or anyone in dev). The toggle itself
@@ -140,6 +141,7 @@ export class HostLobbyModal extends BaseModal {
       this.serverTimeOffset = calculateServerTimeOffset(lobby.serverTime);
     }
     this.lobbyStartAt = lobby.startsAt ?? null;
+    this.gracePeriodUntil = (lobby as any).gracePeriodUntil ?? null;
     this.lobbyCreatorClientID = lobby.lobbyCreatorClientID ?? "";
     if (lobby.clients) {
       this.clients = lobby.clients;
@@ -325,14 +327,29 @@ export class HostLobbyModal extends BaseModal {
             this.serverTimeOffset,
           )
         : null;
+
+    const gracePeriodSeconds =
+      this.gracePeriodUntil !== null && secondsRemaining === null
+        ? getSecondsUntilServerTimestamp(
+            this.gracePeriodUntil,
+            this.serverTimeOffset,
+          )
+        : 0;
+
+    const inGracePeriod = gracePeriodSeconds > 0;
+
     const statusLabel =
-      secondsRemaining === null
-        ? this.clients.length === 1
-          ? translateText("host_modal.waiting")
-          : translateText("game_settings.start")
-        : translateText("host_modal.starting_in", {
+      secondsRemaining !== null
+        ? translateText("host_modal.starting_in", {
             time: renderDuration(secondsRemaining),
-          });
+          })
+        : inGracePeriod
+          ? translateText("host_modal.review_time", {
+              time: renderDuration(gracePeriodSeconds),
+            })
+          : this.clients.length === 1
+            ? translateText("host_modal.waiting")
+            : translateText("game_settings.start");
 
     const inputCards = [
       html`<toggle-input-card

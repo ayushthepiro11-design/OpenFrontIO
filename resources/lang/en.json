@@ -1129,6 +1129,7 @@
     "player_whitelist_placeholder": "comma separated",
     "players": "Players",
     "remove_player": "Remove {username}",
+    "review_time": "Review rules ({time})",
     "spectator": "Spectator",
     "spectators": "Spectators",
     "start_delay": "Start delay (Seconds)",

@@ -113,8 +113,14 @@ export function hasRuleChanges(
       if (p !== target[key]) return true;
     }
   }
-  if (patch.hostCheats !== undefined) {
+  if ("hostCheats" in patch) {
+    const patchCheatsEnabled = hostCheatsEnabled(patch.hostCheats);
+    const targetCheatsEnabled = hostCheatsEnabled(target.hostCheats);
+    if (patchCheatsEnabled !== targetCheatsEnabled) {
+      return true;
+    }
     if (
+      patchCheatsEnabled &&
       JSON.stringify(patch.hostCheats) !== JSON.stringify(target.hostCheats)
     ) {
       return true;
