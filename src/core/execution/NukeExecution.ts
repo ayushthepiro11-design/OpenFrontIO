@@ -219,9 +219,16 @@ export class NukeExecution implements Execution {
         for (const launchTick of silo.missileTimerQueue()) {
           lastDep = Math.max(launchTick + 1, lastDep + 1);
         }
-        if (lastDep > this.mg.ticks()) {
-          this.waitTicks += lastDep - this.mg.ticks();
-        }
+        // The queue drains as tubes mature, so lastDep can fall behind a
+        // departure an earlier, still-waiting nuke from this silo already
+        // owns. Never hand out that tick again: take whichever is later.
+        lastDep = Math.max(
+          lastDep,
+          silo.missileDepartureTick(),
+          this.mg.ticks(),
+        );
+        this.waitTicks += lastDep - this.mg.ticks();
+        silo.recordMissileDeparture(lastDep + 1);
       }
       this.nuke = this.player.buildUnit(this.nukeType, this.src, {
         targetTile: this.dst,

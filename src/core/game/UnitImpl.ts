@@ -56,6 +56,11 @@ export class UnitImpl implements Unit {
   private _troops: number;
   // Number of missiles in cooldown, if empty all missiles are ready.
   private _missileTimerQueue: number[] = [];
+  // Tick on which the most recent nuke reserved from this silo departs, or -1
+  // if none has been reserved yet. The reload queue alone cannot answer this:
+  // MissileSiloExecution drains matured entries, so a later reservation can
+  // rebuild a departure tick that an earlier, still-waiting nuke already owns.
+  private _missileDepartureTick: number = -1;
   private _hasTrainStation: boolean = false;
   private _level: number = 1;
   private _targetable: boolean = true;
@@ -576,6 +581,14 @@ export class UnitImpl implements Unit {
     return this._samLauncherState;
   }
 
+  missileDepartureTick(): number {
+    return this._missileDepartureTick;
+  }
+
+  recordMissileDeparture(tick: number): void {
+    this._missileDepartureTick = tick;
+  }
+
   reloadMissile(): void {
     this._missileTimerQueue.shift();
     this.mg.addUpdate(this.toUpdate());
@@ -842,6 +855,7 @@ export class UnitImpl implements Unit {
       lastOwner: w.playerOrNull(this._lastOwner),
       troops: this._troops,
       missileTimerQueue: [...this._missileTimerQueue],
+      missileDepartureTick: this._missileDepartureTick,
       hasTrainStation: this._hasTrainStation,
       level: this._level,
       targetable: this._targetable,
@@ -897,6 +911,7 @@ export class UnitImpl implements Unit {
     this._lastOwner = r.playerOrNull(s.lastOwner) as PlayerImpl | null;
     this._troops = s.troops;
     this._missileTimerQueue = [...s.missileTimerQueue];
+    this._missileDepartureTick = s.missileDepartureTick ?? -1;
     this._hasTrainStation = s.hasTrainStation;
     this._level = s.level;
     this._targetable = s.targetable;
@@ -954,6 +969,8 @@ export const UnitSnapshot = snapshotType({
     lastOwner: zPlayerRef().nullable(),
     troops: zNum(),
     missileTimerQueue: z.array(zInt()),
+    // Optional: snapshots taken before this field existed have no value here.
+    missileDepartureTick: zInt().optional(),
     hasTrainStation: z.boolean(),
     level: zInt(),
     targetable: z.boolean(),

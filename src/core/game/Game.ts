@@ -555,6 +555,11 @@ export interface Unit {
   reloadMissile(): void;
   isInCooldown(): boolean;
   missileTimerQueue(): number[];
+  // Departure tick of the last nuke this silo reserved. Reload queue entries
+  // are dropped as tubes mature, so this is what keeps two nukes from one silo
+  // from being handed the same departure tick.
+  missileDepartureTick(): number;
+  recordMissileDeparture(tick: number): void;
   samLauncherState(): SamLauncherState | undefined;
 
   // Trade Ships

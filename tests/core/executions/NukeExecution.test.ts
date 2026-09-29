@@ -525,6 +525,71 @@ describe("NukeExecution", () => {
     const tiles = nukes.map((n) => n.tile());
     expect(new Set(tiles).size).toBe(6);
   });
+
+  test("a reloading tube does not let a later nuke reuse an earlier departure tick", () => {
+    // The reload queue drains one matured entry per tick, so a silo that has
+    // been firing can rebuild a departure tick that a still-waiting nuke from
+    // the same silo already owns. Shrinking the cooldown reaches that boundary
+    // in a handful of ticks; #5391 hits it on a level-91 silo with the real
+    // 90-tick reload.
+    (game.config() as TestConfig).SiloCooldown = vi.fn(() => 2);
+    (game.config() as TestConfig).setDefaultNukeSpeed(20);
+
+    const silo = player.buildUnit(UnitType.MissileSilo, game.ref(50, 50), {});
+    game.addExecution(new MissileSiloExecution(silo));
+    for (let i = 0; i < 3; i++) {
+      silo.increaseLevel();
+      silo.reloadMissile();
+    }
+
+    game.addExecution(
+      new ConstructionExecution(
+        player,
+        UnitType.AtomBomb,
+        game.ref(150, 150),
+        undefined,
+        4,
+      ),
+    );
+    // Four bombs reserve on tick 3, so they depart on ticks 4, 5, 6 and 7.
+    executeTicks(game, 3);
+    expect(player.units(UnitType.AtomBomb)).toHaveLength(4);
+
+    // A tube reloaded on tick 5, so this bomb still has somewhere to launch
+    // from. It reserves on tick 6, by which point the queue has lost an entry.
+    game.addExecution(
+      new ConstructionExecution(
+        player,
+        UnitType.AtomBomb,
+        game.ref(150, 150),
+        undefined,
+        1,
+      ),
+    );
+
+    // A bomb has departed once it leaves the launch tile, so record the tick
+    // each one first moves.
+    const departedAt = new Map<number, number>();
+    for (let i = 0; i < 6; i++) {
+      const tiles = new Map(
+        player.units(UnitType.AtomBomb).map((n) => [n.id(), n.tile()]),
+      );
+      executeTicks(game, 1);
+      for (const nuke of player.units(UnitType.AtomBomb)) {
+        if (
+          tiles.get(nuke.id()) === silo.tile() &&
+          nuke.tile() !== silo.tile()
+        ) {
+          departedAt.set(nuke.id(), game.ticks());
+        }
+      }
+    }
+
+    // Five bombs, five departure ticks: none leaves the silo alongside another.
+    const departures = [...departedAt.values()];
+    expect(departedAt.size).toBe(5);
+    expect(new Set(departures).size).toBe(departures.length);
+  });
 });
 
 describe("NukeExecution kill credit", () => {
