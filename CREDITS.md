@@ -117,6 +117,16 @@ Licensed under ODbL
 © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright)  
 Licensed under ODbL
 
+### Shinobi World Map
+
+Original artwork created for OpenFront. `map-generator/assets/maps/shinobiworld/image.png` is
+drawn procedurally by `map-generator/tools/shinobiworld/draw_image.py`: the coastline, borders,
+relief and island shapes come from fractal noise and hand-placed control points. No copyrighted
+map or artwork was copied or traced. Nation names are place names from the Naruto setting, used
+descriptively.
+
+Licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)
+
 ## Icons
 
 ### [The Noun Project](https://thenounproject.com/)
