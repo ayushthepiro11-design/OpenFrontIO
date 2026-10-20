@@ -1,0 +1,101 @@
+{
+  "id": "ShinobiWorld",
+  "name": "Shinobi World",
+  "translation_key": "map.shinobiworld",
+  "categories": ["fictional", "asia"],
+  "multiplayer_frequency": 3,
+  "team_frequency": 8,
+  "special_team_count": 4,
+  "themes": ["asia"],
+  "disabled_modifiers": ["isRandomSpawn"],
+  "nations": [
+    {
+      "name": "Land of Earth",
+      "coordinates": [259, 278]
+    },
+    {
+      "name": "Land of Lightning",
+      "coordinates": [1018, 249]
+    },
+    {
+      "name": "Land of Fire",
+      "coordinates": [762, 742]
+    },
+    {
+      "name": "Land of Wind",
+      "coordinates": [214, 831]
+    },
+    {
+      "name": "Land of Water",
+      "coordinates": [1367, 810]
+    },
+    {
+      "name": "Land of Iron",
+      "coordinates": [614, 175]
+    },
+    {
+      "name": "Land of Frost",
+      "coordinates": [819, 209]
+    },
+    {
+      "name": "Land of Hot Water",
+      "coordinates": [931, 514]
+    },
+    {
+      "name": "Land of Sound",
+      "coordinates": [818, 523]
+    },
+    {
+      "name": "Land of Waterfalls",
+      "coordinates": [703, 394]
+    },
+    {
+      "name": "Land of Grass",
+      "coordinates": [603, 621]
+    },
+    {
+      "name": "Land of Rain",
+      "coordinates": [485, 724]
+    },
+    {
+      "name": "Land of Stone",
+      "coordinates": [163, 595]
+    },
+    {
+      "name": "Land of Valley",
+      "coordinates": [466, 935]
+    },
+    {
+      "name": "Land of Rivers",
+      "coordinates": [654, 982]
+    },
+    {
+      "name": "Land of Tea",
+      "coordinates": [812, 951]
+    },
+    {
+      "name": "Land of Demons",
+      "coordinates": [959, 785]
+    },
+    {
+      "name": "Land of Sky",
+      "coordinates": [1026, 646]
+    },
+    {
+      "name": "Land of Bears",
+      "coordinates": [518, 436]
+    },
+    {
+      "name": "Land of Whirlpools",
+      "coordinates": [1108, 1116]
+    },
+    {
+      "name": "Land of Waves",
+      "coordinates": [915, 1194]
+    },
+    {
+      "name": "Land of the Sea",
+      "coordinates": [430, 1221]
+    }
+  ]
+}

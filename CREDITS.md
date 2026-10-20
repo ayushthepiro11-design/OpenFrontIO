@@ -69,6 +69,14 @@ Licensed under [CC0 1.0.](https://creativecommons.org/publicdomain/zero/1.0/lega
 [NASA/JPL-Caltech](https://www.jpl.nasa.gov/images/pia10748-our-milky-way-gets-a-makeover-artist-concept/)
 [Public Domain](https://www.jpl.nasa.gov/jpl-image-use-policy/)
 
+### Brain Rot Map
+
+[https://en.wikipedia.org/wiki/Human_brain#/media/File:Skull_and_brain_normal_human.svg](https://en.wikipedia.org/wiki/Human_brain#/media/File:Skull_and_brain_normal_human.svg)
+Patrick J. Lynch, medical illustrator
+Skull and brain normal human diagram.
+Creative Commons Attribution 2.5 License 2006
+File:Skull and brain normal human.svg
+
 ### Strait Of Malacca Map
 
 [https://commons.wikimedia.org/wiki/User:Sadalmelik#/media/File:Sumatra_Topography.png](https://commons.wikimedia.org/wiki/File:Sumatra_Topography.png#/media/File:Sumatra_Topography.png)
@@ -108,6 +116,16 @@ Licensed under ODbL
 
 © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright)  
 Licensed under ODbL
+
+### Shinobi World Map
+
+Original artwork created for OpenFront. `map-generator/assets/maps/shinobiworld/image.png` is
+drawn procedurally by `map-generator/tools/shinobiworld/draw_image.py`: the coastline, borders,
+relief and island shapes come from fractal noise and hand-placed control points. No copyrighted
+map or artwork was copied or traced. Nation names are place names from the Naruto setting, used
+descriptively.
+
+Licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)
 
 ## Icons
 

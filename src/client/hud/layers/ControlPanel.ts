@@ -1,26 +1,19 @@
+import { TileRef } from "@openfront/engine-api/game/GameMap";
+import { GameMode, GameType, Gold } from "@openfront/engine-api/game/GameTypes";
+import { GameUpdateType } from "@openfront/engine-api/game/GameUpdates";
+import { ClientID } from "@openfront/engine-api/Schemas";
+import { Config } from "@openfront/engine-lib/configuration/Config";
+import { renderNumber, renderTroops } from "@openfront/engine-lib/Format";
+import { assetUrl } from "@openfront/shared/AssetUrls";
+import { EventBus } from "@openfront/shared/EventBus";
 import { LitElement, html } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { keyed } from "lit/directives/keyed.js";
-import { assetUrl } from "../../../core/AssetUrls";
-import { EventBus } from "../../../core/EventBus";
-import { ClientID } from "../../../core/Schemas";
-import { Config } from "../../../core/configuration/Config";
-import { GameMode, GameType, Gold } from "../../../core/game/Game";
-import { TileRef } from "../../../core/game/GameMap";
-import { GameUpdateType } from "../../../core/game/GameUpdates";
-import {
-  USER_SETTINGS_CHANGED_EVENT,
-  UserSettings,
-} from "../../../core/game/UserSettings";
 import { Controller } from "../../Controller";
 import { AttackRatioEvent } from "../../InputHandler";
 import { UIState } from "../../UIState";
-import {
-  getGamesPlayed,
-  renderNumber,
-  renderTroops,
-  translateText,
-} from "../../Utils";
+import { USER_SETTINGS_CHANGED_EVENT, UserSettings } from "../../UserSettings";
+import { getGamesPlayed, translateText } from "../../Utils";
 import { GameView } from "../../view";
 import { PlayerView } from "../../view/PlayerView";
 import { goldCoinIcon, soldierIcon } from "../HotbarIcons";
@@ -599,6 +592,21 @@ export class ControlPanel extends LitElement implements Controller {
     `;
   }
 
+  private getMobileAttackRatioLabel(): string {
+    const percent = (this.attackRatio * 100).toFixed(0);
+    const troops = renderTroops(
+      (this.game?.myPlayer()?.troops() ?? 0) * this.attackRatio,
+    );
+    const translated = translateText("control_panel.attack_ratio", {
+      percent,
+      troops,
+    });
+    return translated !== "control_panel.attack_ratio" &&
+      translated.includes(percent)
+      ? translated
+      : `${percent}%\n(${troops})`;
+  }
+
   private renderMobile() {
     return html`
       ${this.renderNotification()}
@@ -630,26 +638,26 @@ export class ControlPanel extends LitElement implements Controller {
         >
           ${this.renderMobileTroopBar()}
         </div>
-        <!-- Sword + % label -->
-        <div
-          class="flex flex-col items-center shrink-0 gap-0.5 w-8"
-          translate="no"
-        >
-          <img
-            src=${swordIcon}
-            alt=""
-            aria-hidden="true"
-            width="10"
-            height="10"
-            style="filter: brightness(0) invert(1);"
-          />
-          <span class="text-white text-xs font-bold tabular-nums"
-            >${(this.attackRatio * 100).toFixed(0)}%</span
-          >
+        <!-- Sword + % and troop count label -->
+        <div class="flex flex-col items-center justify-center shrink-0">
+          <div class="flex items-center gap-0.5">
+            <img
+              src=${swordIcon}
+              alt=""
+              aria-hidden="true"
+              width="10"
+              height="10"
+              style="filter: brightness(0) invert(1);"
+            />
+            <span
+              class="text-white text-[11px] font-bold tabular-nums text-center leading-tight whitespace-pre-wrap"
+              >${this.getMobileAttackRatioLabel()}</span
+            >
+          </div>
         </div>
         <!-- Attack ratio slider -->
         <div
-          class="flex-1 ${this.tutorialHighlightClass("attack_ratio")}"
+          class="flex-1 min-w-0 ${this.tutorialHighlightClass("attack_ratio")}"
           translate="no"
         >
           <input
