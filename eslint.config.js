@@ -18,6 +18,7 @@ export default [
       "src/server/gatekeeper/**",
       "tests/pathfinding/playground/**",
       ".claude/**",
+      "roblox/**",
     ],
   },
   { files: ["**/*.{js,mjs,cjs,ts}"] },
