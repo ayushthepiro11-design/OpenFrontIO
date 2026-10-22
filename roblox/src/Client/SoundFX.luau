@@ -1,10 +1,14 @@
+--!native
 --!strict
--- Zero-error local `rbxasset://sounds/` sound effect synthesizer for OpenFront UI & battle cues
+-- 4-Voice Polyphonic `rbxasset://sounds/` Audio Synthesizer (`SoundFX.luau`)
+-- Simultaneous explosions, builds, sirens, and clicks play overlapping without cutting each other off!
 
 local SoundService = game:GetService("SoundService")
 
 local SoundFX = {}
 SoundFX.Volume = 0.7
+
+local VOICE_POOL_SIZE = 4
 
 local CUES: { [string]: { url: string, pitch: number, vol: number } } = {
 	click = { url = "rbxasset://sounds/button.wav", pitch = 1.15, vol = 0.35 },
@@ -19,7 +23,8 @@ local CUES: { [string]: { url: string, pitch: number, vol: number } } = {
 	victory = { url = "rbxasset://sounds/victory.wav", pitch = 1.0, vol = 0.75 },
 }
 
-local soundPool: { [string]: Sound } = {}
+local voicePools: { [string]: { Sound } } = {}
+local voiceCursor: { [string]: number } = {}
 
 function SoundFX.Play(cueName: string)
 	if SoundFX.Volume <= 0.01 then
@@ -29,22 +34,31 @@ function SoundFX.Play(cueName: string)
 	if spec == nil then
 		return
 	end
-	local s = soundPool[cueName]
-	if s == nil then
-		local ok, created = pcall(function()
-			local snd = Instance.new("Sound")
-			snd.Name = "OF_" .. cueName
-			snd.SoundId = spec.url
-			snd.Parent = SoundService
-			return snd
-		end)
-		if not ok or created == nil then
-			return
+	local pool = voicePools[cueName]
+	if pool == nil then
+		pool = {}
+		for i = 1, VOICE_POOL_SIZE do
+			local ok, created = pcall(function()
+				local snd = Instance.new("Sound")
+				snd.Name = string.format("OF_%s_%d", cueName, i)
+				snd.SoundId = spec.url
+				snd.Parent = SoundService
+				return snd
+			end)
+			if ok and created ~= nil then
+				table.insert(pool, created)
+			end
 		end
-		s = created
-		soundPool[cueName] = s
+		voicePools[cueName] = pool
+		voiceCursor[cueName] = 0
 	end
-	s.PlaybackSpeed = spec.pitch
+	if #pool == 0 then
+		return
+	end
+	local idx = ((voiceCursor[cueName] or 0) % #pool) + 1
+	voiceCursor[cueName] = idx
+	local s = pool[idx]
+	s.PlaybackSpeed = spec.pitch * (0.98 + (idx - 1) * 0.015)
 	s.Volume = math.clamp(spec.vol * SoundFX.Volume, 0, 1)
 	s.TimePosition = 0
 	s:Play()

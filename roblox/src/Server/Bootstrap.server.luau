@@ -1,15 +1,18 @@
+--!native
 --!strict
--- OpenFront Server Bootstrap:
--- Disables 3D character clutter, initializes Remotes & DataService, runs the live background
--- Preview Battle on the Main Menu, manages Public Lobby Queue + Singleplayer + Custom Host Lobby,
--- processes all ClientIntents at 10Hz, and awards persistent XP / Wins on Match End!
+-- Security-Hardened OpenFront Authoritative Match Server (`Bootstrap.server.luau`)
+-- Supports ALL 24 Full-Scale 1:1 OpenFront Maps (`1000x1000` .. `4108x1948`) with:
+--   - Pure 2D workspace cleanup (`CharacterAutoLoads = false`)
+--   - Sliding-window per-player RemoteEvent Rate Limiter (`<= 45 intents/sec` anti-flood protection!)
+--   - Strict `Config.IsFiniteNumber` sanitization on EVERY GameConfig & ClientIntent parameter (`zero NaN/Inf bugs!`)
+--   - Host / Singleplayer / Studio authorization for `StartMatchNow` & `SimControl` (`1x`/`2x`/`4x`/Pause)
+--   - XP anti-exploit gate (`xpEligible = false` when cheat flags are active)
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
--- Pure 2D Browser-Exact Experience: prevent default 3D avatars or baseplates from cluttering memory/screen!
 Players.CharacterAutoLoads = false
 for _, child in ipairs(Workspace:GetChildren()) do
 	if child:IsA("BasePart") or child:IsA("SpawnLocation") or child:IsA("Model") then
@@ -25,7 +28,6 @@ local Theme = require(Shared:WaitForChild("Theme"))
 local DataService = require(script.Parent:WaitForChild("DataService"))
 local SimEngine = require(script.Parent:WaitForChild("SimEngine"))
 
--- Create Remotes Folder cleanly in ReplicatedStorage
 local Remotes = ReplicatedStorage:FindFirstChild("OpenFrontRemotes")
 if Remotes == nil then
 	Remotes = Instance.new("Folder")
@@ -62,14 +64,33 @@ local MatchResultRE = makeRemoteEvent("MatchResult")
 local ProfileSyncRE = makeRemoteEvent("ProfileSync")
 local GetInitialStateRF = makeRemoteFunction("GetInitialState")
 
--- Public Lobby Queue State (rotating featured OpenFront maps just like Master.ts!)
+-- Sliding-window per-player rate limiter (`<= 45 intents/sec`)
+local rateWindowStart: { [number]: number } = {}
+local rateCount: { [number]: number } = {}
+local hostUserId = 0
+
+local function allowIntentRate(uid: number): boolean
+	local now = os.clock()
+	local wStart = rateWindowStart[uid] or 0
+	if now - wStart >= 1.0 then
+		rateWindowStart[uid] = now
+		rateCount[uid] = 1
+		return true
+	end
+	local c = (rateCount[uid] or 0) + 1
+	rateCount[uid] = c
+	return c <= 45
+end
+
 local FEATURED_ROTATION = {
 	{ mapId = "World", mode = "FFA", numTeams = 0 },
-	{ mapId = "ShinobiWorld", mode = "FFA", numTeams = 0 },
 	{ mapId = "Europe", mode = "Teams", numTeams = 2 },
 	{ mapId = "NorthAmerica", mode = "FFA", numTeams = 0 },
+	{ mapId = "ShinobiWorld", mode = "FFA", numTeams = 0 },
+	{ mapId = "GiantWorldMap", mode = "Teams", numTeams = 4 },
+	{ mapId = "IndianSubcontinent", mode = "FFA", numTeams = 0 },
 	{ mapId = "Asia", mode = "Teams", numTeams = 3 },
-	{ mapId = "Africa", mode = "FFA", numTeams = 0 },
+	{ mapId = "Caribbean", mode = "FFA", numTeams = 0 },
 }
 
 local rotationIndex = 1
@@ -79,6 +100,11 @@ local lobbyCountdown = 15
 local activeEngine: any = nil
 local activeMode: "Preview" | "LiveMatch" = "Preview"
 local postGameCooldown = 0
+local xpEligible = true
+
+local function isHostAuthorized(plr: Player): boolean
+	return RunService:IsStudio() or #Players:GetPlayers() <= 1 or hostUserId == 0 or plr.UserId == hostUserId
+end
 
 local function buildHumanList(selectedPlayers: { Player })
 	local out = {}
@@ -101,10 +127,10 @@ local function startPreviewBattle()
 	activeMode = "Preview"
 	local previewCfg = Config.DefaultGameConfig(true)
 	previewCfg.mapId = FEATURED_ROTATION[rotationIndex].mapId
-	previewCfg.bots = 40
+	previewCfg.bots = 30
 	previewCfg.goldMultiplier = 3
+	previewCfg.seed = 42000 + rotationIndex
 	activeEngine = SimEngine.new(previewCfg, {}, true)
-	-- Fast-forward 25 ticks so the preview map opens with lively borders right away!
 	for _ = 1, 25 do
 		activeEngine:Step()
 	end
@@ -114,6 +140,7 @@ end
 local function startLiveMatch(cfg: any, participants: { Player })
 	activeMode = "LiveMatch"
 	postGameCooldown = 0
+	xpEligible = not (cfg.infiniteGold or cfg.infiniteTroops or cfg.instantBuild or cfg.startingGold > 0)
 	table.clear(publicQueueUsers)
 	local humans = buildHumanList(participants)
 	activeEngine = SimEngine.new(cfg, humans, false)
@@ -144,7 +171,6 @@ local function broadcastLobbyState()
 	})
 end
 
--- Sanitize custom host GameConfig from client
 local function sanitizeConfig(raw: any): any
 	local base = Config.DefaultGameConfig(false)
 	if type(raw) ~= "table" then
@@ -156,15 +182,11 @@ local function sanitizeConfig(raw: any): any
 	if raw.mode == "FFA" or raw.mode == "Teams" then
 		base.mode = raw.mode
 	end
-	if type(raw.numTeams) == "number" then
-		base.numTeams = math.clamp(math.floor(raw.numTeams), -1, 7)
-	end
+	base.numTeams = math.floor(Config.SafeClampNumber(raw.numTeams, -1, 7, base.numTeams))
 	if raw.difficulty == "Easy" or raw.difficulty == "Medium" or raw.difficulty == "Hard" or raw.difficulty == "Impossible" then
 		base.difficulty = raw.difficulty
 	end
-	if type(raw.bots) == "number" then
-		base.bots = math.clamp(math.floor(raw.bots), 0, 180)
-	end
+	base.bots = math.floor(Config.SafeClampNumber(raw.bots, 0, 180, base.bots))
 	if type(raw.spawnNations) == "boolean" then
 		base.spawnNations = raw.spawnNations
 	end
@@ -177,18 +199,12 @@ local function sanitizeConfig(raw: any): any
 	if type(raw.infiniteTroops) == "boolean" then
 		base.infiniteTroops = raw.infiniteTroops
 	end
-	if type(raw.startingGold) == "number" then
-		base.startingGold = math.clamp(math.floor(raw.startingGold), 0, 50_000_000)
-	end
-	if type(raw.goldMultiplier) == "number" then
-		base.goldMultiplier = math.clamp(raw.goldMultiplier, 0.5, 20)
-	end
+	base.startingGold = math.floor(Config.SafeClampNumber(raw.startingGold, 0, 50_000_000, base.startingGold))
+	base.goldMultiplier = Config.SafeClampNumber(raw.goldMultiplier, 0.5, 20, base.goldMultiplier)
 	if type(raw.disableAlliances) == "boolean" then
 		base.disableAlliances = raw.disableAlliances
 	end
-	if type(raw.allianceDurationMinutes) == "number" then
-		base.allianceDurationMinutes = math.clamp(math.floor(raw.allianceDurationMinutes), 1, 15)
-	end
+	base.allianceDurationMinutes = math.floor(Config.SafeClampNumber(raw.allianceDurationMinutes, 1, 15, base.allianceDurationMinutes))
 	if type(raw.donateGold) == "boolean" then
 		base.donateGold = raw.donateGold
 	end
@@ -213,6 +229,7 @@ local function sanitizeConfig(raw: any): any
 	if type(raw.singleplayer) == "boolean" then
 		base.singleplayer = raw.singleplayer
 	end
+	base.seed = math.floor(Config.SafeClampNumber(raw.seed, 1, 2_147_483_647, math.floor(os.clock() * 1000) % 1_000_000 + 1337))
 	return base
 end
 
@@ -229,8 +246,10 @@ ClientIntentRE.OnServerEvent:Connect(function(plr: Player, intentType: any, payl
 		return
 	end
 	local uid = plr.UserId
+	if not allowIntentRate(uid) then
+		return
+	end
 
-	-- Lobby & Profile intents
 	if intentType == "UpdateProfile" and type(payload) == "table" then
 		local updated = DataService.UpdatePreferences(uid, payload)
 		ProfileSyncRE:FireClient(plr, updated)
@@ -240,14 +259,32 @@ ClientIntentRE.OnServerEvent:Connect(function(plr: Player, intentType: any, payl
 		broadcastLobbyState()
 		return
 	elseif intentType == "StartMatchNow" then
+		if not isHostAuthorized(plr) then
+			return
+		end
 		local cfg = sanitizeConfig(payload)
 		local participants = Players:GetPlayers()
 		startLiveMatch(cfg, participants)
 		broadcastLobbyState()
 		return
+	elseif intentType == "SimControl" and type(payload) == "table" then
+		if activeEngine ~= nil and isHostAuthorized(plr) then
+			if type(payload.paused) == "boolean" then
+				activeEngine.paused = payload.paused
+			end
+			local spd = payload.speed or payload.simSpeed
+			if Config.IsFiniteNumber(spd) then
+				activeEngine.simSpeed = math.clamp(math.floor(spd), 1, 4)
+			end
+		end
+		return
+	elseif intentType == "StartSpawnNow" then
+		if activeEngine ~= nil and activeEngine.inSpawnPhase and isHostAuthorized(plr) then
+			activeEngine.ticks = activeEngine.spawnPhaseTicks - 1
+		end
+		return
 	elseif intentType == "ReturnToLobby" then
-		-- If singleplayer or all humans dead/finished, return server to Preview Lobby!
-		if activeMode == "LiveMatch" then
+		if activeMode == "LiveMatch" and activeEngine ~= nil then
 			local otherAliveHumans = false
 			for _, p in ipairs(activeEngine.playersList) do
 				if p.playerType == "Human" and p.userId ~= uid and p.alive then
@@ -263,13 +300,14 @@ ClientIntentRE.OnServerEvent:Connect(function(plr: Player, intentType: any, payl
 		return
 	end
 
-	-- Active Match Gameplay Intents
 	if activeMode ~= "LiveMatch" or activeEngine == nil or type(payload) ~= "table" then
 		return
 	end
 
 	if intentType == "ChooseSpawn" then
-		activeEngine:ChooseSpawn(uid, tonumber(payload.x) or 0, tonumber(payload.y) or 0)
+		if Config.IsFiniteNumber(payload.x) and Config.IsFiniteNumber(payload.y) then
+			activeEngine:ChooseSpawn(uid, payload.x, payload.y)
+		end
 		return
 	end
 
@@ -279,100 +317,124 @@ ClientIntentRE.OnServerEvent:Connect(function(plr: Player, intentType: any, payl
 	end
 
 	if intentType == "AttackLand" then
-		local targetSmallId = math.floor(tonumber(payload.targetSmallId) or 0)
-		local ratio = math.clamp(tonumber(payload.ratio) or 0.25, 0.01, 1.0)
-		activeEngine:StartLandAttack(me, targetSmallId, me.troops * ratio, nil)
+		if Config.IsFiniteNumber(payload.targetSmallId) then
+			local targetSmallId = math.floor(payload.targetSmallId)
+			local ratio = Config.SafeClampNumber(payload.ratio, 0.01, 1.0, 0.25)
+			activeEngine:StartLandAttack(me, targetSmallId, me.troops * ratio, nil)
+		end
 	elseif intentType == "BoatAttack" then
-		local x = math.clamp(math.floor(tonumber(payload.x) or 0), 0, activeEngine.map.width - 1)
-		local y = math.clamp(math.floor(tonumber(payload.y) or 0), 0, activeEngine.map.height - 1)
-		local ratio = math.clamp(tonumber(payload.ratio) or 0.25, 0.01, 1.0)
-		activeEngine:LaunchBoatAttack(me, y * activeEngine.map.width + x, me.troops * ratio)
+		if Config.IsFiniteNumber(payload.x) and Config.IsFiniteNumber(payload.y) then
+			local x = math.clamp(math.floor(payload.x), 0, activeEngine.map.width - 1)
+			local y = math.clamp(math.floor(payload.y), 0, activeEngine.map.height - 1)
+			local ratio = Config.SafeClampNumber(payload.ratio, 0.01, 1.0, 0.25)
+			activeEngine:LaunchBoatAttack(me, y * activeEngine.map.width + x, me.troops * ratio)
+		end
 	elseif intentType == "Retreat" then
-		local atkId = if type(payload.attackId) == "number" then payload.attackId else nil
+		local atkId = if Config.IsFiniteNumber(payload.attackId) then math.floor(payload.attackId) else nil
 		activeEngine:RetreatAttack(me, atkId)
 	elseif intentType == "RetreatBoats" then
 		activeEngine:RetreatBoats(me)
 	elseif intentType == "BuildUnit" then
-		local unitType = tostring(payload.unitType or "")
-		local x = math.clamp(math.floor(tonumber(payload.x) or 0), 0, activeEngine.map.width - 1)
-		local y = math.clamp(math.floor(tonumber(payload.y) or 0), 0, activeEngine.map.height - 1)
-		activeEngine:BuildUnit(me, unitType :: any, y * activeEngine.map.width + x)
-	elseif intentType == "UpgradeStructure" then
-		activeEngine:UpgradeStructure(me, math.floor(tonumber(payload.unitId) or 0))
-	elseif intentType == "DeleteStructure" then
-		activeEngine:DeleteStructure(me, math.floor(tonumber(payload.unitId) or 0))
-	elseif intentType == "MoveWarship" then
-		activeEngine:MoveWarship(
-			me,
-			math.floor(tonumber(payload.unitId) or 0),
-			tonumber(payload.x) or 0,
-			tonumber(payload.y) or 0
-		)
-	elseif intentType == "AllianceRequest" then
-		local other = activeEngine.playersBySmallId[math.floor(tonumber(payload.targetSmallId) or 0)]
-		if other ~= nil then
-			activeEngine:SendAllianceRequest(me, other)
+		if type(payload.unitType) == "string" and Config.IsFiniteNumber(payload.x) and Config.IsFiniteNumber(payload.y) then
+			local x = math.clamp(math.floor(payload.x), 0, activeEngine.map.width - 1)
+			local y = math.clamp(math.floor(payload.y), 0, activeEngine.map.height - 1)
+			activeEngine:BuildUnit(me, payload.unitType :: any, y * activeEngine.map.width + x)
 		end
-	elseif intentType == "RespondAlliance" then
-		local other = activeEngine.playersBySmallId[math.floor(tonumber(payload.fromSmallId) or 0)]
-		local alerts = activeEngine.alertsByPlayer[me.smallId] or {}
-		for i = #alerts, 1, -1 do
-			if alerts[i].fromSmallId == (if other then other.smallId else -999) and alerts[i].kind ~= "NukeInbound" then
-				table.remove(alerts, i)
+	elseif intentType == "UpgradeStructure" then
+		if Config.IsFiniteNumber(payload.unitId) then
+			activeEngine:UpgradeStructure(me, math.floor(payload.unitId))
+		end
+	elseif intentType == "DeleteStructure" then
+		if Config.IsFiniteNumber(payload.unitId) then
+			activeEngine:DeleteStructure(me, math.floor(payload.unitId))
+		end
+	elseif intentType == "MoveWarship" then
+		if Config.IsFiniteNumber(payload.unitId) and Config.IsFiniteNumber(payload.x) and Config.IsFiniteNumber(payload.y) then
+			activeEngine:MoveWarship(me, math.floor(payload.unitId), payload.x, payload.y)
+		end
+	elseif intentType == "AllianceRequest" then
+		if Config.IsFiniteNumber(payload.targetSmallId) then
+			local other = activeEngine.playersBySmallId[math.floor(payload.targetSmallId)]
+			if other ~= nil then
+				activeEngine:SendAllianceRequest(me, other)
 			end
 		end
-		if other ~= nil and payload.accept == true then
-			activeEngine:FormAlliance(me, other)
+	elseif intentType == "RespondAlliance" then
+		if Config.IsFiniteNumber(payload.fromSmallId) then
+			local fromId = math.floor(payload.fromSmallId)
+			local other = activeEngine.playersBySmallId[fromId]
+			local alerts = activeEngine.alertsByPlayer[me.smallId] or {}
+			local foundValid = false
+			for i = #alerts, 1, -1 do
+				if alerts[i].fromSmallId == fromId and alerts[i].kind ~= "NukeInbound" then
+					foundValid = true
+					table.remove(alerts, i)
+				end
+			end
+			if other ~= nil and foundValid and payload.accept == true then
+				activeEngine:FormAlliance(me, other)
+			end
 		end
 	elseif intentType == "DismissAlert" then
-		local alertId = math.floor(tonumber(payload.alertId) or 0)
-		local alerts = activeEngine.alertsByPlayer[me.smallId] or {}
-		for i = #alerts, 1, -1 do
-			if alerts[i].id == alertId then
-				table.remove(alerts, i)
+		if Config.IsFiniteNumber(payload.alertId) then
+			local alertId = math.floor(payload.alertId)
+			local alerts = activeEngine.alertsByPlayer[me.smallId] or {}
+			for i = #alerts, 1, -1 do
+				if alerts[i].id == alertId then
+					table.remove(alerts, i)
+				end
 			end
 		end
 	elseif intentType == "BreakAlliance" then
-		local other = activeEngine.playersBySmallId[math.floor(tonumber(payload.targetSmallId) or 0)]
-		if other ~= nil then
-			activeEngine:BreakAlliance(me, other)
+		if Config.IsFiniteNumber(payload.targetSmallId) then
+			local other = activeEngine.playersBySmallId[math.floor(payload.targetSmallId)]
+			if other ~= nil then
+				activeEngine:BreakAlliance(me, other)
+			end
 		end
 	elseif intentType == "ToggleEmbargo" then
-		local targetId = math.floor(tonumber(payload.targetSmallId) or 0)
-		if targetId == -1 then
-			-- Embargo All toggle!
-			local hasAny = next(me.embargoes) ~= nil
-			table.clear(me.embargoes)
-			if not hasAny then
-				for _, other in ipairs(activeEngine.playersList) do
-					if other ~= me and not activeEngine:AreFriendly(me, other) then
-						me.embargoes[other.smallId] = true
+		if Config.IsFiniteNumber(payload.targetSmallId) then
+			local targetId = math.floor(payload.targetSmallId)
+			if targetId == -1 then
+				local hasAny = next(me.embargoes) ~= nil
+				table.clear(me.embargoes)
+				if not hasAny then
+					for _, other in ipairs(activeEngine.playersList) do
+						if other ~= me and not activeEngine:AreFriendly(me, other) then
+							me.embargoes[other.smallId] = true
+						end
 					end
 				end
-			end
-		elseif targetId > 0 then
-			if me.embargoes[targetId] then
-				me.embargoes[targetId] = nil
-			else
-				me.embargoes[targetId] = true
+			elseif targetId > 0 then
+				if me.embargoes[targetId] then
+					me.embargoes[targetId] = nil
+				else
+					me.embargoes[targetId] = true
+				end
 			end
 		end
 	elseif intentType == "Donate" then
-		local other = activeEngine.playersBySmallId[math.floor(tonumber(payload.targetSmallId) or 0)]
-		if other ~= nil then
-			local kind: "gold" | "troops" = if payload.kind == "gold" then "gold" else "troops"
-			activeEngine:DonateResources(me, other, kind, tonumber(payload.amount) or 0)
+		if Config.IsFiniteNumber(payload.targetSmallId) and Config.IsFiniteNumber(payload.amount) then
+			local other = activeEngine.playersBySmallId[math.floor(payload.targetSmallId)]
+			if other ~= nil then
+				local kind: "gold" | "troops" = if payload.kind == "gold" then "gold" else "troops"
+				activeEngine:DonateResources(me, other, kind, payload.amount)
+			end
 		end
 	elseif intentType == "TargetPlayer" then
-		local other = activeEngine.playersBySmallId[math.floor(tonumber(payload.targetSmallId) or 0)]
-		if other ~= nil and activeEngine.ticks - me.lastTargetTick >= 50 then
-			me.lastTargetTick = activeEngine.ticks
-			other.targetedBy[me.smallId] = activeEngine.ticks + Config.TARGET_DURATION_TICKS
-			activeEngine:PushEvent("chat", "🎯 " .. me.name .. " marked " .. other.name .. " as a target!", "#ef4444", other.labelX, other.labelY)
+		if Config.IsFiniteNumber(payload.targetSmallId) then
+			local other = activeEngine.playersBySmallId[math.floor(payload.targetSmallId)]
+			if other ~= nil and activeEngine.ticks - me.lastTargetTick >= Config.TARGET_COOLDOWN_TICKS then
+				me.lastTargetTick = activeEngine.ticks
+				other.targetedBy[me.smallId] = activeEngine.ticks + Config.TARGET_DURATION_TICKS
+				activeEngine:PushEvent("chat", "🎯 " .. me.name .. " marked " .. other.name .. " as a target!", "#ef4444", other.labelX, other.labelY)
+			end
 		end
 	elseif intentType == "SendEmoji" then
 		local em = tostring(payload.emoji or "🫡")
-		activeEngine:SetEmoji(me, em)
+		if Config.AllowedEmojis[em] then
+			activeEngine:SetEmoji(me, em)
+		end
 	elseif intentType == "QuickChat" then
 		local qcId = tostring(payload.id or "")
 		for _, qc in ipairs(Config.QuickChats) do
@@ -385,6 +447,9 @@ ClientIntentRE.OnServerEvent:Connect(function(plr: Player, intentType: any, payl
 end)
 
 Players.PlayerAdded:Connect(function(plr: Player)
+	if hostUserId == 0 then
+		hostUserId = plr.UserId
+	end
 	local prof = DataService.LoadProfile(plr.UserId)
 	ProfileSyncRE:FireClient(plr, prof)
 	broadcastLobbyState()
@@ -392,13 +457,17 @@ end)
 
 Players.PlayerRemoving:Connect(function(plr: Player)
 	publicQueueUsers[plr.UserId] = nil
+	rateWindowStart[plr.UserId] = nil
+	rateCount[plr.UserId] = nil
+	if plr.UserId == hostUserId then
+		local rem = Players:GetPlayers()
+		hostUserId = if #rem > 0 then rem[1].UserId else 0
+	end
 	DataService.ReleaseProfile(plr.UserId)
 end)
 
--- Boot initial live Preview Battle right away!
 startPreviewBattle()
 
--- Main 10Hz Authoritative Fixed-Timestep Tick Loop (zero-drift 0.1000s step matching OpenFront!)
 local tickCounter = 0
 local tickAccumulator = 0.0
 
@@ -406,29 +475,65 @@ local function runAuthoritativeTick()
 	tickCounter += 1
 
 	if activeEngine ~= nil then
-		activeEngine:Step()
+		local subSteps = if activeEngine.paused then 0 else math.clamp(activeEngine.simSpeed or 1, 1, 4)
+		for _ = 1, subSteps do
+			activeEngine:Step()
+		end
 
-			if activeMode == "LiveMatch" then
-				-- Notify eliminated humans immediately so they get provisional XP / Spectate modal!
+		if activeMode == "LiveMatch" then
+			for _, p in ipairs(activeEngine.playersList) do
+				if p.playerType == "Human" and not activeEngine.inSpawnPhase and p.hasSpawned and not p.alive and not p.deathNotified then
+					p.deathNotified = true
+					local plr = Players:GetPlayerByUserId(p.userId)
+					if plr ~= nil then
+						local peakShare = p.tilesPeak / math.max(1, activeEngine.map.numLandTiles)
+						local reward = DataService.RecordMatchResult(
+							p.userId,
+							false,
+							p.tilesPeak,
+							peakShare,
+							p.nukesSent,
+							p.goldEarned,
+							p.survivedTicks / Config.TICKS_PER_SECOND,
+							xpEligible
+						)
+						ProfileSyncRE:FireClient(plr, DataService.GetProfile(p.userId))
+						MatchResultRE:FireClient(plr, {
+							kind = "Eliminated",
+							winnerName = activeEngine.winnerName,
+							tilesPeak = p.tilesPeak,
+							landPctPeak = peakShare * 100,
+							nukesSent = p.nukesSent,
+							reward = reward,
+						})
+					end
+				end
+			end
+
+			if activeEngine.gameOver and postGameCooldown == 0 then
+				postGameCooldown = 1
 				for _, p in ipairs(activeEngine.playersList) do
-					if p.playerType == "Human" and not activeEngine.inSpawnPhase and p.hasSpawned and not p.alive and not p.deathNotified then
+					if p.playerType == "Human" and not p.deathNotified then
 						p.deathNotified = true
+						local isWinner = (activeEngine.winnerSmallId == p.smallId)
+							or (p.team ~= nil and activeEngine.winnerTeam == p.team)
 						local plr = Players:GetPlayerByUserId(p.userId)
 						if plr ~= nil then
 							local peakShare = p.tilesPeak / math.max(1, activeEngine.map.numLandTiles)
 							local reward = DataService.RecordMatchResult(
 								p.userId,
-								false,
+								isWinner,
 								p.tilesPeak,
 								peakShare,
 								p.nukesSent,
 								p.goldEarned,
-								p.survivedTicks / Config.TICKS_PER_SECOND
+								p.survivedTicks / Config.TICKS_PER_SECOND,
+								xpEligible
 							)
 							ProfileSyncRE:FireClient(plr, DataService.GetProfile(p.userId))
 							MatchResultRE:FireClient(plr, {
-								kind = "Eliminated",
-								winnerName = activeEngine.winnerName,
+								kind = if isWinner then "Victory" else "Defeat",
+								winnerName = activeEngine.winnerName or p.name,
 								tilesPeak = p.tilesPeak,
 								landPctPeak = peakShare * 100,
 								nukesSent = p.nukesSent,
@@ -437,77 +542,42 @@ local function runAuthoritativeTick()
 						end
 					end
 				end
-
-				-- Check full Victory!
-				if activeEngine.gameOver and postGameCooldown == 0 then
-					postGameCooldown = 1
-					for _, p in ipairs(activeEngine.playersList) do
-						if p.playerType == "Human" and not p.deathNotified then
-							p.deathNotified = true
-							local isWinner = (activeEngine.winnerSmallId == p.smallId)
-								or (p.team ~= nil and activeEngine.winnerTeam == p.team)
-							local plr = Players:GetPlayerByUserId(p.userId)
-							if plr ~= nil then
-								local peakShare = p.tilesPeak / math.max(1, activeEngine.map.numLandTiles)
-								local reward = DataService.RecordMatchResult(
-									p.userId,
-									isWinner,
-									p.tilesPeak,
-									peakShare,
-									p.nukesSent,
-									p.goldEarned,
-									p.survivedTicks / Config.TICKS_PER_SECOND
-								)
-								ProfileSyncRE:FireClient(plr, DataService.GetProfile(p.userId))
-								MatchResultRE:FireClient(plr, {
-									kind = if isWinner then "Victory" else "Defeat",
-									winnerName = activeEngine.winnerName or p.name,
-									tilesPeak = p.tilesPeak,
-									landPctPeak = peakShare * 100,
-									nukesSent = p.nukesSent,
-									reward = reward,
-								})
-							end
-						end
-					end
-				end
-			elseif activeMode == "Preview" and activeEngine.ticks > 1400 then
-				-- Cycle preview map every ~2.3 minutes for variety on the home screen!
-				rotationIndex = (rotationIndex % #FEATURED_ROTATION) + 1
-				startPreviewBattle()
 			end
-
-			StateSyncRE:FireAllClients(activeEngine:BuildTickPayload(false))
+		elseif activeMode == "Preview" and activeEngine.ticks > 1400 then
+			rotationIndex = (rotationIndex % #FEATURED_ROTATION) + 1
+			startPreviewBattle()
 		end
 
-		-- Once per second: update Public Queue countdown & auto-start when queued players ready!
-		if tickCounter % 10 == 0 then
-			if activeMode == "Preview" then
-				local hasQueued = false
-				for _, q in pairs(publicQueueUsers) do
-					if q then
-						hasQueued = true
-						break
-					end
-				end
-				if hasQueued then
-					lobbyCountdown -= 1
-					if lobbyCountdown <= 0 then
-						local slot = FEATURED_ROTATION[rotationIndex]
-						local cfg = Config.DefaultGameConfig(false)
-						cfg.mapId = slot.mapId
-						cfg.mode = slot.mode :: any
-						cfg.numTeams = slot.numTeams
-						lobbyCountdown = 15
-						rotationIndex = (rotationIndex % #FEATURED_ROTATION) + 1
-						startLiveMatch(cfg, Players:GetPlayers())
-					end
-				else
-					lobbyCountdown = 12
+		StateSyncRE:FireAllClients(activeEngine:BuildTickPayload(false))
+	end
+
+	if tickCounter % 10 == 0 then
+		if activeMode == "Preview" then
+			local hasQueued = false
+			for _, q in pairs(publicQueueUsers) do
+				if q then
+					hasQueued = true
+					break
 				end
 			end
-			broadcastLobbyState()
+			if hasQueued then
+				lobbyCountdown -= 1
+				if lobbyCountdown <= 0 then
+					local slot = FEATURED_ROTATION[rotationIndex]
+					local cfg = Config.DefaultGameConfig(false)
+					cfg.mapId = slot.mapId
+					cfg.mode = slot.mode :: any
+					cfg.numTeams = slot.numTeams
+					lobbyCountdown = 15
+					rotationIndex = (rotationIndex % #FEATURED_ROTATION) + 1
+					startLiveMatch(cfg, Players:GetPlayers())
+				end
+			else
+				lobbyCountdown = 12
+			end
 		end
+		broadcastLobbyState()
+	end
 end
 
 RunService.Heartbeat:Connect(function(dt: number)

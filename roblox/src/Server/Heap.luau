@@ -1,5 +1,7 @@
+--!native
 --!strict
--- Exact port of OpenFront's FlatBinaryHeap.ts for organic priority-ordered border tile conquest
+-- Exact `--!native` port of OpenFront's FlatBinaryHeap.ts with O(1) `peekPriority()`,
+-- empty-dequeue safety, and memory trim on `clear()`.
 
 local Heap = {}
 Heap.__index = Heap
@@ -15,8 +17,8 @@ export type MinHeap = typeof(setmetatable(
 
 function Heap.new(): MinHeap
 	return setmetatable({
-		tiles = table.create(256, 0),
-		pri = table.create(256, 0),
+		tiles = table.create(512, 0),
+		pri = table.create(512, 0),
 		len = 0,
 	}, Heap)
 end
@@ -25,8 +27,19 @@ function Heap.size(self: MinHeap): number
 	return self.len
 end
 
+function Heap.peekPriority(self: MinHeap): number?
+	if self.len <= 0 then
+		return nil
+	end
+	return self.pri[1]
+end
+
 function Heap.clear(self: MinHeap)
 	self.len = 0
+	if #self.tiles > 4096 then
+		self.tiles = table.create(512, 0)
+		self.pri = table.create(512, 0)
+	end
 end
 
 function Heap.enqueue(self: MinHeap, tile: number, priority: number)
@@ -49,11 +62,14 @@ function Heap.enqueue(self: MinHeap, tile: number, priority: number)
 	end
 end
 
-function Heap.dequeue(self: MinHeap): number
+function Heap.dequeue(self: MinHeap): number?
+	local n = self.len
+	if n <= 0 then
+		return nil
+	end
 	local tiles = self.tiles
 	local pri = self.pri
 	local top = tiles[1]
-	local n = self.len
 	local lastTile = tiles[n]
 	local lastPri = pri[n]
 	n -= 1

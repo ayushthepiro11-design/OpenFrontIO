@@ -1,8 +1,12 @@
+--!native
 --!strict
--- Complete Authoritative OpenFront 10Hz Simulation Engine for Roblox
--- Mirrors GameImpl, PlayerImpl, AttackExecution, TransportShipExecution, TradeShipExecution,
--- TrainExecution, WarshipExecution, NukeExecution, MIRVExecution, SAMLauncherExecution,
--- DoomsdayClockExecution & WinCheckExecution.
+-- Authoritative Full-Scale 1:1 OpenFront 10Hz Simulation Engine (`SimEngine.luau`)
+-- Engineered for ALL 24 full-resolution maps (`1000x1000` .. `4108x1948` = `8,002,384` tiles & up to `107` nations!):
+--   - Deterministic `Mulberry32` seeded PRNG (`self:_Rand()`, `self:_RandInt()`) — 0 unseeded `math.random` calls!
+--   - Iterative non-recursive concave border fill (`zero stack overflow on huge continents!`)
+--   - `32x32` Spatial Hash `UnitGrid` + `SharedWaterCache` (`O(1)` range combat & sea lanes!)
+--   - Sparse `activeFalloutRefs` list (`O(crater)` fallout recovery + full `falloutSnapshot` sync!)
+--   - Warship TradeShip piracy, Coastal DefensePost shelling, SAM lock reservation, Nuke betrayal!
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("OpenFrontShared")
@@ -31,7 +35,7 @@ local TRIBE_PREFIXES = {
 }
 local TRIBE_SUFFIXES = {
 	"Pact", "League", "Duchy", "March", "Clan", "Union", "Guard", "Freehold",
-	"Republic", "Order", "Realm", "barony", "Commune", "Front", "Dominion", "Hold",
+	"Republic", "Order", "Realm", "Barony", "Commune", "Front", "Dominion", "Hold",
 }
 
 local CAPTURABLE_STRUCTURES: { [string]: boolean } = {
@@ -43,14 +47,40 @@ local CAPTURABLE_STRUCTURES: { [string]: boolean } = {
 	SAMLauncher = true,
 }
 
+local GRID_SHIFT = 5 -- 32x32 tile spatial buckets!
+
 export type EngineInstance = typeof(setmetatable({} :: any, SimEngine))
+
+function SimEngine:_Rand(): number
+	local s = bit32.band((self.rngState :: number) + 0x6D2B79F5, 0xFFFFFFFF)
+	self.rngState = s
+	local t = bit32.bxor(s, bit32.rshift(s, 15))
+	t = bit32.band(t * bit32.bor(1, s), 0xFFFFFFFF)
+	t = bit32.band(t + bit32.bxor(t, bit32.band(bit32.bxor(t, bit32.rshift(t, 7)) * bit32.bor(61, t), 0xFFFFFFFF)), 0xFFFFFFFF)
+	return bit32.bxor(t, bit32.rshift(t, 14)) / 4294967296.0
+end
+
+function SimEngine:_RandInt(lo: number, hi: number): number
+	if hi <= lo then
+		return lo
+	end
+	return lo + math.floor(self:_Rand() * (hi - lo + 1))
+end
 
 function SimEngine.new(cfg: GameConfig, humanConfigs: { any }, isPreview: boolean?): EngineInstance
 	local rawDef = MapRegistry.Get(cfg.mapId)
 	local map = MapCodec.DecodeMap(rawDef)
 
+	local initSeed = bit32.band(math.floor(cfg.seed or 133701), 0xFFFFFFFF)
+	if initSeed == 0 then
+		initSeed = 0x9E3779B9
+	end
+
 	local self = setmetatable({}, SimEngine) :: any
 	self.config = cfg
+	self.rngState = initSeed
+	self.paused = false
+	self.simSpeed = 1
 	self.isPreview = isPreview == true
 	self.map = map
 	self.rawMap = rawDef
@@ -75,7 +105,16 @@ function SimEngine.new(cfg: GameConfig, humanConfigs: { any }, isPreview: boolea
 	self.unitsByTile = {} :: { [number]: any }
 	self.nextUnitId = 0
 
-	self.railEdges = {} :: { { number } } -- flat pairs/polylines for client rail rendering
+	self.gridCols = math.ceil(map.width / 32)
+	self.gridRows = math.ceil(map.height / 32)
+	self.unitGrid = {} :: { [number]: { any } }
+	self.sharedWaterCache = {} :: { [string]: { number } }
+	self.waterCacheCount = 0
+
+	self.activeFalloutRefs = {} :: { number }
+	self.inFalloutSet = {} :: { [number]: boolean }
+
+	self.railEdges = {} :: { { number } }
 	self.railNetworkDirty = false
 
 	self.allianceRequests = {}
@@ -85,7 +124,6 @@ function SimEngine.new(cfg: GameConfig, humanConfigs: { any }, isPreview: boolea
 	self.nextEventId = 0
 	self.explosions = {} :: { { x: number, y: number, radius: number, kind: string } }
 
-	-- Per-tick dirty tile deltas
 	self.deltaRefs = {} :: { number }
 	self.deltaOwners = {} :: { number }
 	self.deltaCount = 0
@@ -98,13 +136,144 @@ function SimEngine.new(cfg: GameConfig, humanConfigs: { any }, isPreview: boolea
 	return self
 end
 
+function SimEngine:_GridCellIndex(x: number, y: number): number
+	local gx = math.clamp(bit32.rshift(math.max(0, math.floor(x)), GRID_SHIFT), 0, self.gridCols - 1)
+	local gy = math.clamp(bit32.rshift(math.max(0, math.floor(y)), GRID_SHIFT), 0, self.gridRows - 1)
+	return gy * self.gridCols + gx + 1
+end
+
+function SimEngine:_GridInsert(u: any)
+	local c = self:_GridCellIndex(u.x, u.y)
+	u._gridCell = c
+	local bucket = self.unitGrid[c]
+	if bucket == nil then
+		bucket = {}
+		self.unitGrid[c] = bucket
+	end
+	table.insert(bucket, u)
+end
+
+function SimEngine:_GridRemove(u: any)
+	local c = u._gridCell or 0
+	if c <= 0 then
+		return
+	end
+	local bucket = self.unitGrid[c]
+	if bucket ~= nil then
+		for i = #bucket, 1, -1 do
+			if bucket[i] == u then
+				local n = #bucket
+				bucket[i] = bucket[n]
+				bucket[n] = nil
+				break
+			end
+		end
+	end
+	u._gridCell = 0
+end
+
+function SimEngine:_GridUpdatePos(u: any, nx: number, ny: number)
+	u.x = nx
+	u.y = ny
+	local nc = self:_GridCellIndex(nx, ny)
+	if nc ~= u._gridCell then
+		self:_GridRemove(u)
+		u._gridCell = nc
+		local bucket = self.unitGrid[nc]
+		if bucket == nil then
+			bucket = {}
+			self.unitGrid[nc] = bucket
+		end
+		table.insert(bucket, u)
+	end
+end
+
+function SimEngine:_ForUnitsInRadius(cx: number, cy: number, radius: number, fn: (any) -> boolean?)
+	local minGX = math.clamp(bit32.rshift(math.max(0, math.floor(cx - radius)), GRID_SHIFT), 0, self.gridCols - 1)
+	local maxGX = math.clamp(bit32.rshift(math.max(0, math.ceil(cx + radius)), GRID_SHIFT), 0, self.gridCols - 1)
+	local minGY = math.clamp(bit32.rshift(math.max(0, math.floor(cy - radius)), GRID_SHIFT), 0, self.gridRows - 1)
+	local maxGY = math.clamp(bit32.rshift(math.max(0, math.ceil(cy + radius)), GRID_SHIFT), 0, self.gridRows - 1)
+	local rSq = radius * radius
+	for gy = minGY, maxGY do
+		local base = gy * self.gridCols
+		for gx = minGX, maxGX do
+			local bucket = self.unitGrid[base + gx + 1]
+			if bucket ~= nil then
+				for i = 1, #bucket do
+					local u = bucket[i]
+					if u ~= nil and u.active then
+						local dx = u.x - cx
+						local dy = u.y - cy
+						if dx * dx + dy * dy <= rSq then
+							if fn(u) == true then
+								return
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+function SimEngine:_CachedWaterPath(startRef: number, goalRef: number, maxNodes: number): { number }?
+	local key = tostring(startRef) .. ":" .. tostring(goalRef)
+	local cached = self.sharedWaterCache[key]
+	if cached ~= nil then
+		return cached
+	end
+	local map = self.map
+	local path = MapCodec.FindWaterPath(map, startRef, goalRef, math.min(maxNodes, 2600))
+	if path == nil then
+		local sw = if MapCodec.IsWater(map, startRef) then startRef else MapCodec.AdjacentWater(map, startRef)
+		local dw = if MapCodec.IsWater(map, goalRef) then goalRef else MapCodec.AdjacentWater(map, goalRef)
+		if sw ~= nil and dw ~= nil and MapCodec.SameWaterBody(map, sw, dw) then
+			local w, h = map.width, map.height
+			local sx, sy = sw % w, math.floor(sw / w)
+			local gx, gy = dw % w, math.floor(dw / w)
+			local dx = gx - sx
+			if map.wrapX then
+				if dx > w * 0.5 then
+					dx -= w
+				elseif dx < -w * 0.5 then
+					dx += w
+				end
+			end
+			local dy = gy - sy
+			local steps = math.max(2, math.ceil(math.sqrt(dx * dx + dy * dy)))
+			local built = table.create(steps + 2)
+			table.insert(built, startRef)
+			for s = 1, steps - 1 do
+				local t = s / steps
+				local px = sx + dx * t
+				if map.wrapX then
+					px = px % w
+				end
+				local ix = math.clamp(math.floor(px + 0.5), 0, w - 1)
+				local iy = math.clamp(math.floor(sy + dy * t + 0.5), 0, h - 1)
+				table.insert(built, iy * w + ix)
+			end
+			table.insert(built, goalRef)
+			path = built
+		end
+	end
+	if path ~= nil then
+		if self.waterCacheCount >= 512 then
+			table.clear(self.sharedWaterCache)
+			self.waterCacheCount = 0
+		end
+		self.sharedWaterCache[key] = path
+		self.waterCacheCount += 1
+	end
+	return path
+end
+
 function SimEngine:_AssignTeam(index: number, playerType: Types.PlayerType): string?
 	local cfg: GameConfig = self.config
 	if cfg.mode ~= "Teams" then
 		return nil
 	end
 	if cfg.numTeams == -1 then
-		-- Humans vs Nations
 		return if playerType == "Human" then "Humans" else "Nations"
 	end
 	local count = math.clamp(cfg.numTeams, 2, #Theme.TeamOrder)
@@ -163,7 +332,7 @@ function SimEngine:_AddParticipant(info: {
 		spawnY = info.prefY,
 		labelX = math.max(0, info.prefX),
 		labelY = math.max(0, info.prefY),
-		labelSpan = 6,
+		labelSpan = 16,
 		tilesOwned = 0,
 		tilesPeak = 0,
 		troops = Config.StartingManpower(info.playerType, self.config),
@@ -174,16 +343,17 @@ function SimEngine:_AddParticipant(info: {
 		isDoomed = false,
 		doomWarnStartTick = -1,
 		spawnImmunityUntil = 0,
-		allies = {} :: { [number]: number }, -- otherSmallId -> expiresTick
+		allies = {} :: { [number]: number },
 		embargoes = {} :: { [number]: boolean },
 		relations = {} :: { [number]: number },
-		targetedBy = {} :: { [number]: number }, -- otherSmallId -> expiresTick
+		targetedBy = {} :: { [number]: number },
 		emoji = nil :: string?,
 		emojiUntilTick = -1,
 		lastDonateTick = -999,
 		lastTargetTick = -999,
 		lastDeleteTick = -999,
 		lastAllianceReqTick = -999,
+		lastEmojiTick = -999,
 		nukesSent = 0,
 		deathNotified = false,
 		survivedTicks = 0,
@@ -211,13 +381,13 @@ end
 function SimEngine:_FindRandomUnclaimedLand(minDistSq: number): (number, number)
 	local map = self.map
 	local w, h = map.width, map.height
-	for attempt = 1, 220 do
-		local x = math.random(2, w - 3)
-		local y = math.random(2, h - 3)
+	for attempt = 1, 260 do
+		local x = self:_RandInt(4, math.max(4, w - 5))
+		local y = self:_RandInt(4, math.max(4, h - 5))
 		local ref = y * w + x
 		if MapCodec.IsPlayableLand(map, ref) and MapCodec.GetOwner(map, ref) == 0 then
 			local ok = true
-			if attempt < 150 and minDistSq > 0 then
+			if attempt < 180 and minDistSq > 0 then
 				for _, other in ipairs(self.playersList) do
 					if other.spawnX >= 0 then
 						local dx = other.spawnX - x
@@ -234,9 +404,8 @@ function SimEngine:_FindRandomUnclaimedLand(minDistSq: number): (number, number)
 			end
 		end
 	end
-	-- Guaranteed fallback linear scan
-	local startRef = math.random(0, map.size - 1)
-	for step = 0, map.size - 1 do
+	local startRef = self:_RandInt(0, map.size - 1)
+	for step = 0, map.size - 1, 7 do
 		local ref = (startRef + step) % map.size
 		if MapCodec.IsPlayableLand(map, ref) and MapCodec.GetOwner(map, ref) == 0 then
 			return ref % w, math.floor(ref / w)
@@ -247,13 +416,14 @@ end
 
 function SimEngine:_InitParticipants(humanConfigs: { any })
 	local teamIdx = 0
+	local sf = Config.MapScaleFactor(self.map.width)
+	local baseSep = math.max(18, math.floor(26 * sf))
 
-	-- 1. Real Roblox human players
 	for _, hc in ipairs(humanConfigs) do
 		teamIdx += 1
 		local sx, sy = -1, -1
 		if self.config.randomSpawn then
-			sx, sy = self:_FindRandomUnclaimedLand(320)
+			sx, sy = self:_FindRandomUnclaimedLand(baseSep * baseSep)
 		end
 		self:_AddParticipant({
 			userId = hc.userId,
@@ -268,15 +438,15 @@ function SimEngine:_InitParticipants(humanConfigs: { any })
 		})
 	end
 
-	-- 2. Map-manifest named AI Nations (enforcing clean minimum spawn spacing so zero micro-speckles form!)
+	-- Full-Scale Sovereign Nations (`ALL 72` on World, `71` on NorthAmerica, up to `90` on GiantWorldMap!)
 	if self.config.spawnNations then
 		local nations = self.rawMap.nations or {}
 		local ordered = table.clone(nations)
 		table.sort(ordered, function(a, b)
 			return (a.strength or 1) > (b.strength or 1)
 		end)
-		local minSepSq = if self.map.width <= 550 then (24 * 24) else (32 * 32)
-		local maxNations = if self.isPreview then 26 else 36
+		local minSepSq = math.max(100, math.floor(16 * sf) ^ 2)
+		local maxNations = if self.isPreview then 48 else 90
 		local addedNations = 0
 		for _, nat in ipairs(ordered) do
 			if addedNations >= maxNations then
@@ -315,9 +485,8 @@ function SimEngine:_InitParticipants(humanConfigs: { any })
 		end
 	end
 
-	-- 3. Minor AI Bots (well-spaced across open continents so zero tiny confetti blobs occur!)
-	local botTarget = if self.isPreview then 6 else math.clamp(self.config.bots, 0, 120)
-	local botSepSq = if self.map.width <= 550 then (26 * 26) else (34 * 34)
+	local botTarget = if self.isPreview then 14 else math.clamp(self.config.bots, 0, 120)
+	local botSepSq = math.max(400, math.floor(42 * sf) ^ 2)
 	for b = 1, botTarget do
 		local bx, by = self:_FindRandomUnclaimedLand(botSepSq)
 		local bName = TRIBE_PREFIXES[((b - 1) % #TRIBE_PREFIXES) + 1]
@@ -345,6 +514,9 @@ function SimEngine:ChooseSpawn(userId: number, x: number, y: number): boolean
 	if not self.inSpawnPhase or self.config.randomSpawn then
 		return false
 	end
+	if not Config.IsFiniteNumber(x) or not Config.IsFiniteNumber(y) then
+		return false
+	end
 	local p = self.playersByUserId[userId]
 	if p == nil then
 		return false
@@ -362,9 +534,14 @@ function SimEngine:ChooseSpawn(userId: number, x: number, y: number): boolean
 	return true
 end
 
+local _ENQ_STACK = table.create(32, 0)
+local _ENQ_NBUF1 = { 0, 0, 0, 0 }
+local _ENQ_NBUF2 = { 0, 0, 0, 0 }
+
 function SimEngine:_UpdateBorderForTile(ref: number)
 	local map = self.map
-	local oid = MapCodec.GetOwner(map, ref)
+	local ownerBuf = map.owner
+	local oid = buffer.readu16(ownerBuf, ref * 2)
 	if oid == 0 then
 		return
 	end
@@ -372,16 +549,24 @@ function SimEngine:_UpdateBorderForTile(ref: number)
 	if p == nil then
 		return
 	end
-	local nbuf = { 0, 0, 0, 0 }
-	local n = MapCodec.Neighbors4(map, ref, nbuf)
-	local isBorder = (n < 4)
-	if not isBorder then
-		for i = 1, n do
-			local nb = nbuf[i]
-			if MapCodec.GetOwner(map, nb) ~= oid then
-				isBorder = true
-				break
-			end
+	local w = map.width
+	local x = ref % w
+	local y = (ref - x) / w
+	local isBorder = false
+	if y == 0 or y == map.height - 1 then
+		isBorder = true
+	else
+		local lx = if x > 0 then x - 1 elseif map.wrapX then w - 1 else -1
+		local rx = if x < w - 1 then x + 1 elseif map.wrapX then 0 else -1
+		if lx < 0 or rx < 0 then
+			isBorder = true
+		elseif
+			buffer.readu16(ownerBuf, (ref - w) * 2) ~= oid
+			or buffer.readu16(ownerBuf, (ref + w) * 2) ~= oid
+			or buffer.readu16(ownerBuf, (y * w + lx) * 2) ~= oid
+			or buffer.readu16(ownerBuf, (y * w + rx) * 2) ~= oid
+		then
+			isBorder = true
 		end
 	end
 	local curIdx = p.borderSet[ref]
@@ -409,7 +594,6 @@ function SimEngine:ConquerTile(newOwnerId: number, ref: number)
 		return
 	end
 
-	-- Remove from old owner's border set & tile tally
 	if oldOwnerId > 0 then
 		local oldP = self.playersBySmallId[oldOwnerId]
 		if oldP ~= nil then
@@ -439,9 +623,13 @@ function SimEngine:ConquerTile(newOwnerId: number, ref: number)
 				newP.tilesPeak = newP.tilesOwned
 			end
 		end
+		if MapCodec.HasFallout(map, ref) and MapCodec.SetFallout(map, ref, false) then
+			self.falloutDeltaCount += 1
+			self.falloutDeltaRefs[self.falloutDeltaCount] = ref
+			self.falloutDeltaStates[self.falloutDeltaCount] = 0
+		end
 	end
 
-	-- Transfer or remove any structure sitting on this conquered tile (exact OpenFront behavior!)
 	local unitOnTile = self.unitsByTile[ref]
 	if unitOnTile ~= nil and unitOnTile.active then
 		if newOwnerId == 0 then
@@ -451,37 +639,50 @@ function SimEngine:ConquerTile(newOwnerId: number, ref: number)
 		end
 	end
 
-	-- Record network delta
 	self.deltaCount += 1
 	self.deltaRefs[self.deltaCount] = ref
 	self.deltaOwners[self.deltaCount] = newOwnerId
 
-	-- Refresh border membership of tile + 4 neighbors
 	self:_UpdateBorderForTile(ref)
-	local nbuf = { 0, 0, 0, 0 }
-	local n = MapCodec.Neighbors4(map, ref, nbuf)
-	for i = 1, n do
-		self:_UpdateBorderForTile(nbuf[i])
+	local w = map.width
+	local x = ref % w
+	local y = (ref - x) / w
+	local lx = if x > 0 then x - 1 elseif map.wrapX then w - 1 else -1
+	if lx >= 0 then
+		self:_UpdateBorderForTile(y * w + lx)
+	end
+	local rx = if x < w - 1 then x + 1 elseif map.wrapX then 0 else -1
+	if rx >= 0 then
+		self:_UpdateBorderForTile(y * w + rx)
+	end
+	if y > 0 then
+		self:_UpdateBorderForTile(ref - w)
+	end
+	if y < map.height - 1 then
+		self:_UpdateBorderForTile(ref + w)
 	end
 end
 
 function SimEngine:_FinalizeSpawns()
 	local map = self.map
 	local w, h = map.width, map.height
+	local r = math.max(5, math.floor(7 * Config.MapScaleFactor(w) + 0.5))
+	local rSq = r * r
+
 	for _, p in ipairs(self.playersList) do
 		if p.spawnX < 0 or p.spawnY < 0 or MapCodec.GetOwner(map, p.spawnY * w + p.spawnX) ~= 0 then
-			p.spawnX, p.spawnY = self:_FindRandomUnclaimedLand(120)
+			p.spawnX, p.spawnY = self:_FindRandomUnclaimedLand(160)
 		end
 		p.labelX = p.spawnX
 		p.labelY = p.spawnY
+		p.labelSpan = r * 2
 		p.hasSpawned = true
 		p.spawnImmunityUntil = self.ticks + Config.SPAWN_IMMUNITY_TICKS
 
-		-- Claim initial circular territory (~13 tiles, radius 2)
-		for dy = -2, 2 do
-			for dx = -2, 2 do
-				if dx * dx + dy * dy <= 5 then
-					local tx = p.spawnX + dx
+		for dy = -r, r do
+			for dx = -r, r do
+				if dx * dx + dy * dy <= rSq then
+					local tx = if map.wrapX then ((p.spawnX + dx) % w) else (p.spawnX + dx)
 					local ty = p.spawnY + dy
 					if tx >= 0 and tx < w and ty >= 0 and ty < h then
 						local ref = ty * w + tx
@@ -514,16 +715,10 @@ function SimEngine:AreFriendly(a: any, b: any): boolean
 end
 
 function SimEngine:GetMaxTroops(p: any): number
-	return Config.MaxTroops(p.tilesOwned, p.cityLevels, p.playerType, self.config)
+	return Config.MaxTroops(p.tilesOwned, p.cityLevels, p.playerType, self.config, self.map.width)
 end
 
-function SimEngine:PushEvent(
-	kind: string,
-	text: string,
-	colorHex: string,
-	x: number?,
-	y: number?
-)
+function SimEngine:PushEvent(kind: string, text: string, colorHex: string, x: number?, y: number?)
 	self.nextEventId += 1
 	table.insert(self.events, {
 		id = self.nextEventId,
@@ -544,7 +739,6 @@ function SimEngine:PushAlert(recipientSmallId: number, alert: Types.ActionableAl
 	if list == nil then
 		return
 	end
-	-- Avoid duplicate pending alliance requests from the same sender
 	for _, existing in ipairs(list) do
 		if existing.kind == alert.kind and existing.fromSmallId == alert.fromSmallId and alert.kind ~= "NukeInbound" then
 			return
@@ -556,55 +750,70 @@ function SimEngine:PushAlert(recipientSmallId: number, alert: Types.ActionableAl
 	end
 end
 
--- Enqueue valid frontier tiles adjacent to `tile` for an active Attack
-function SimEngine:_EnqueueAttackNeighbors(atk: any, tile: number)
+-- Iterative, zero-allocation concave-pocket frontier enqueue (`ZERO GC churn or stack overflow on 8M-pixel maps!`)
+function SimEngine:_EnqueueAttackNeighbors(atk: any, rootTile: number, basePrio: number?)
 	local map = self.map
-	local nbuf = { 0, 0, 0, 0 }
-	local nbuf2 = { 0, 0, 0, 0 }
-	local n = MapCodec.Neighbors4(map, tile, nbuf)
-	for i = 1, n do
-		local nb = nbuf[i]
-		if MapCodec.IsPlayableLand(map, nb) and MapCodec.GetOwner(map, nb) == atk.targetSmallId then
-			local ownedByMe = 0
-			local nonEnemySides = 0
-			local n2 = MapCodec.Neighbors4(map, nb, nbuf2)
-			for j = 1, n2 do
-				local o2 = MapCodec.GetOwner(map, nbuf2[j])
-				if o2 == atk.attackerSmallId then
-					ownedByMe += 1
-					nonEnemySides += 1
-				elseif not MapCodec.IsPlayableLand(map, nbuf2[j]) then
-					nonEnemySides += 1
+	local ownerBuf = map.owner
+	local terrainBuf = map.terrain
+	local stack = _ENQ_STACK
+	local nbuf = _ENQ_NBUF1
+	local nbuf2 = _ENQ_NBUF2
+	stack[1] = rootTile
+	local stackTop = 1
+	local iterGuard = 0
+	local targetId = atk.targetSmallId
+	local attackerId = atk.attackerSmallId
+	local pBase = basePrio or self.ticks
+
+	while stackTop > 0 and iterGuard < 24 do
+		iterGuard += 1
+		local tile = stack[stackTop]
+		stackTop -= 1
+
+		local n = MapCodec.Neighbors4(map, tile, nbuf)
+		for i = 1, n do
+			local nb = nbuf[i]
+			if buffer.readu16(ownerBuf, nb * 2) == targetId then
+				local tb = buffer.readu8(terrainBuf, nb)
+				if bit32.band(tb, 0x80) ~= 0 then
+					local ownedByMe = 0
+					local nonEnemySides = 0
+					local n2 = MapCodec.Neighbors4(map, nb, nbuf2)
+					for j = 1, n2 do
+						local nb2 = nbuf2[j]
+						local o2 = buffer.readu16(ownerBuf, nb2 * 2)
+						if o2 == attackerId then
+							ownedByMe += 1
+							nonEnemySides += 1
+						elseif bit32.band(buffer.readu8(terrainBuf, nb2), 0x80) == 0 then
+							nonEnemySides += 1
+						end
+					end
+					-- True surrounded 1-tile enclave pocket only (`nonEnemySides >= 4`); never square-fill diagonal arcs!
+					if nonEnemySides >= 4 and ownedByMe >= 1 and atk.troops >= 2 then
+						self:ConquerTile(attackerId, nb)
+						stackTop += 1
+						stack[stackTop] = nb
+						continue
+					end
+					local elev = bit32.band(tb, 0x1F)
+					local stepCost = if elev >= 20 then 4.2 elseif elev >= 11 then 2.1 else 1.0
+					local prio = pBase + stepCost + self:_Rand() * 2.4 - (ownedByMe - 1) * 0.35
+					if not atk.inHeap[nb] then
+						atk.inHeap[nb] = true
+						atk.borderCount += 1
+						atk.heap:enqueue(nb, prio)
+					elseif ownedByMe >= 3 then
+						atk.heap:enqueue(nb, prio)
+					end
 				end
-			end
-			-- Smooth pocket fill: if surrounded on >=3 sides by attacker/coast, absorb immediately AND enqueue its neighbors!
-			if nonEnemySides >= 3 and ownedByMe >= 2 and atk.troops >= 2 then
-				self:ConquerTile(atk.attackerSmallId, nb)
-				self:_EnqueueAttackNeighbors(atk, nb)
-				continue
-			end
-			local tk = MapCodec.TerrainKind(map, nb)
-			local mag = 1.0
-			if tk == "Highland" then
-				mag = 1.6
-			elseif tk == "Mountain" then
-				mag = 2.4
-			end
-			local prio = self.ticks + mag * 3.0 - ownedByMe * 5.0 + math.random() * 1.5
-			if not atk.inHeap[nb] then
-				atk.inHeap[nb] = true
-				atk.borderCount += 1
-				atk.heap:enqueue(nb, prio)
-			elseif ownedByMe >= 2 then
-				-- Priority-promote concave border pockets so borders sweep smoothly without tendrils!
-				atk.heap:enqueue(nb, prio)
 			end
 		end
 	end
 end
 
 function SimEngine:StartLandAttack(attacker: any, targetSmallId: number, requestedTroops: number, sourceTile: number?)
-	if self.inSpawnPhase or not attacker.alive then
+	if self.inSpawnPhase or not attacker.alive or not Config.IsFiniteNumber(requestedTroops) then
 		return
 	end
 	if targetSmallId == attacker.smallId then
@@ -626,13 +835,11 @@ function SimEngine:StartLandAttack(attacker: any, targetSmallId: number, request
 	end
 	attacker.troops -= sendTroops
 
-	-- Auto-embargo & relation drop on player-vs-player war
 	if targetPlayer ~= nil then
 		targetPlayer.embargoes[attacker.smallId] = true
 		targetPlayer.relations[attacker.smallId] = math.max(-100, (targetPlayer.relations[attacker.smallId] or 0) - 70)
 	end
 
-	-- 1. Cancel head-on opposing attack from targetPlayer -> attacker (exact AttackExecution.ts!)
 	for _, existing in ipairs(self.attacks) do
 		if existing.active and existing.attackerSmallId == targetSmallId and existing.targetSmallId == attacker.smallId then
 			if existing.troops > sendTroops then
@@ -650,7 +857,6 @@ function SimEngine:StartLandAttack(attacker: any, targetSmallId: number, request
 		return
 	end
 
-	-- 2. Merge into existing land attack against the same target (unless amphibious landing)
 	if sourceTile == nil then
 		for _, existing in ipairs(self.attacks) do
 			if
@@ -660,8 +866,11 @@ function SimEngine:StartLandAttack(attacker: any, targetSmallId: number, request
 				and existing.targetSmallId == targetSmallId
 			then
 				existing.troops += sendTroops
-				for _, bRef in ipairs(attacker.borderList) do
-					self:_EnqueueAttackNeighbors(existing, bRef)
+				for idx = #attacker.borderList, 1, -1 do
+					local bRef = attacker.borderList[idx]
+					if bRef ~= nil then
+						self:_EnqueueAttackNeighbors(existing, bRef)
+					end
 				end
 				return
 			end
@@ -683,7 +892,6 @@ function SimEngine:StartLandAttack(attacker: any, targetSmallId: number, request
 	}
 
 	if sourceTile ~= nil then
-		-- Claim beachhead tile first if needed, then enqueue neighbors!
 		if MapCodec.GetOwner(self.map, sourceTile) == targetSmallId then
 			atk.inHeap[sourceTile] = true
 			atk.borderCount = 1
@@ -691,13 +899,15 @@ function SimEngine:StartLandAttack(attacker: any, targetSmallId: number, request
 		end
 		self:_EnqueueAttackNeighbors(atk, sourceTile)
 	else
-		for _, bRef in ipairs(attacker.borderList) do
-			self:_EnqueueAttackNeighbors(atk, bRef)
+		for idx = #attacker.borderList, 1, -1 do
+			local bRef = attacker.borderList[idx]
+			if bRef ~= nil then
+				self:_EnqueueAttackNeighbors(atk, bRef)
+			end
 		end
 	end
 
 	if atk.heap:size() == 0 then
-		-- Not bordering target: refund immediately without loss
 		attacker.troops = math.min(self:GetMaxTroops(attacker), attacker.troops + sendTroops)
 		return
 	end
@@ -721,7 +931,8 @@ function SimEngine:_TileProtectedByDefensePost(defender: any, ref: number): bool
 	local w = self.map.width
 	local tx = ref % w
 	local ty = math.floor(ref / w)
-	local rSq = Config.DEFENSE_POST_RANGE * Config.DEFENSE_POST_RANGE
+	local r = Config.DefensePostRangeScaled(w)
+	local rSq = r * r
 	for _, dp in ipairs(defender.defensePosts) do
 		if dp.active and not dp.underConstruction then
 			local dx = dp.x - tx
@@ -735,10 +946,10 @@ function SimEngine:_TileProtectedByDefensePost(defender: any, ref: number): bool
 end
 
 function SimEngine:_CheckEliminatePocketDefender(attacker: any, defender: any)
-	if not defender.alive or defender.tilesOwned >= 45 then
+	local pocketCap = math.max(60, math.floor(140 * Config.MapScaleFactor(self.map.width)))
+	if not defender.alive or defender.tilesOwned >= pocketCap then
 		return
 	end
-	-- Plunder treasury gold matching EngineConfig.conquerGoldAmount!
 	local plunder = if defender.playerType == "Human"
 		then math.floor(defender.gold * 0.5)
 		else math.floor(defender.gold)
@@ -746,11 +957,23 @@ function SimEngine:_CheckEliminatePocketDefender(attacker: any, defender: any)
 	attacker.gold += plunder
 	attacker.goldEarned += plunder
 
-	-- Sweep defender's remaining pocket tiles
 	local map = self.map
-	for ref = 0, map.size - 1 do
-		if MapCodec.GetOwner(map, ref) == defender.smallId then
-			self:ConquerTile(attacker.smallId, ref)
+	-- Fast O(pocketSize) onion-peel border sweep instead of full 8M pixel scan!
+	local guard = 0
+	while defender.tilesOwned > 0 and #defender.borderList > 0 and guard < 4096 do
+		guard += 1
+		local bRef = defender.borderList[1]
+		if MapCodec.GetOwner(map, bRef) == defender.smallId then
+			self:ConquerTile(attacker.smallId, bRef)
+		else
+			self:_UpdateBorderForTile(bRef)
+		end
+	end
+	if defender.tilesOwned > 0 then
+		for ref = 0, map.size - 1 do
+			if MapCodec.GetOwner(map, ref) == defender.smallId then
+				self:ConquerTile(attacker.smallId, ref)
+			end
 		end
 	end
 	defender.troops = 0
@@ -786,24 +1009,28 @@ function SimEngine:_TickAttacks()
 				attacker.troops = math.min(self:GetMaxTroops(attacker), attacker.troops + atk.troops)
 				atk.active = false
 			else
-				local borderSize = math.max(4, atk.borderCount + math.random(0, 5))
+				local borderSize = math.max(8, atk.borderCount + self:_RandInt(0, 5))
 				local tickBudget = 1.0
 				local safety = 0
 
-				while tickBudget > 0 and safety < 180 do
+				-- Full-Scale 1x Frontier Expansion Throughput (`safety < 3600`!)
+				while tickBudget > 0 and safety < 3600 do
 					safety += 1
 					if atk.troops < 1 then
 						atk.active = false
 						break
 					end
 					if atk.heap:size() == 0 then
-						-- Refund remaining uncommitted army!
 						attacker.troops = math.min(self:GetMaxTroops(attacker), attacker.troops + atk.troops)
 						atk.active = false
 						break
 					end
 
+					local parentPrio = atk.heap:peekPriority() or self.ticks
 					local tile = atk.heap:dequeue()
+					if tile == nil then
+						break
+					end
 					atk.inHeap[tile] = nil
 					atk.borderCount = math.max(0, atk.borderCount - 1)
 
@@ -811,7 +1038,6 @@ function SimEngine:_TickAttacks()
 						continue
 					end
 
-					-- Verify adjacent to attacker (unless beachhead first tile of amphibious boat)
 					local onBorder = atk.isBoat
 					if not onBorder then
 						local n = MapCodec.Neighbors4(map, tile, nbuf)
@@ -825,7 +1051,7 @@ function SimEngine:_TickAttacks()
 					if not onBorder then
 						continue
 					end
-					atk.isBoat = false -- Once ashore, subsequent tiles expand contiguously!
+					atk.isBoat = false
 
 					local hasDP = if defender ~= nil then self:_TileProtectedByDefensePost(defender, tile) else false
 					local fRatio = if MapCodec.HasFallout(map, tile) then falloutShare else nil
@@ -840,16 +1066,17 @@ function SimEngine:_TickAttacks()
 						if defender ~= nil then defender.isTraitor else false,
 						hasDP,
 						fRatio,
-						borderSize
+						borderSize,
+						map.width
 					)
 
-					tickBudget -= math.max(0.008, frac)
+					tickBudget -= math.max(0.0008, frac)
 					atk.troops -= atkLoss
 					if defender ~= nil then
 						defender.troops = math.max(0, defender.troops - defLoss)
 					end
 					self:ConquerTile(attacker.smallId, tile)
-					self:_EnqueueAttackNeighbors(atk, tile)
+					self:_EnqueueAttackNeighbors(atk, tile, parentPrio)
 
 					if defender ~= nil then
 						self:_CheckEliminatePocketDefender(attacker, defender)
@@ -873,14 +1100,15 @@ function SimEngine:_TickAttacks()
 	end
 end
 
--- Amphibious Boat Invasion (TransportShipExecution)
 function SimEngine:LaunchBoatAttack(attacker: any, dstRef: number, requestedTroops: number): boolean
-	if self.inSpawnPhase or not attacker.alive then
+	if self.inSpawnPhase or not attacker.alive or not Config.IsFiniteNumber(requestedTroops) then
 		return false
 	end
 	local map = self.map
 	local w = map.width
-	-- Snap dstRef to nearby playable coastal land if user clicked shallow shoreline water
+	if dstRef < 0 or dstRef >= map.size then
+		return false
+	end
 	if MapCodec.IsWater(map, dstRef) then
 		local nbuf = { 0, 0, 0, 0 }
 		local n = MapCodec.Neighbors4(map, dstRef, nbuf)
@@ -902,23 +1130,28 @@ function SimEngine:LaunchBoatAttack(attacker: any, dstRef: number, requestedTroo
 	if dstPlayer ~= nil and self:AreFriendly(attacker, dstPlayer) then
 		return false
 	end
-
-	-- Enforce BOAT_MAX_NUMBER (3 concurrent boats per player)
 	if (attacker.unitCounts["TransportShip"] or 0) >= Config.BOAT_MAX_NUMBER then
 		return false
 	end
 
-	-- Find closest coastal shore tile owned by attacker
+	local dstWater = MapCodec.AdjacentWater(map, dstRef)
+	if dstWater == nil then
+		return false
+	end
+
 	local tx, ty = dstRef % w, math.floor(dstRef / w)
 	local bestShore: number? = nil
 	local bestDistSq = math.huge
 	for _, bRef in ipairs(attacker.borderList) do
 		if MapCodec.IsShoreLand(map, bRef) then
-			local bx, by = bRef % w, math.floor(bRef / w)
-			local dSq = (bx - tx) * (bx - tx) + (by - ty) * (by - ty)
-			if dSq < bestDistSq then
-				bestDistSq = dSq
-				bestShore = bRef
+			local sw = MapCodec.AdjacentWater(map, bRef)
+			if sw ~= nil and MapCodec.SameWaterBody(map, sw, dstWater) then
+				local bx, by = bRef % w, math.floor(bRef / w)
+				local dSq = (bx - tx) * (bx - tx) + (by - ty) * (by - ty)
+				if dSq < bestDistSq then
+					bestDistSq = dSq
+					bestShore = bRef
+				end
 			end
 		end
 	end
@@ -926,7 +1159,7 @@ function SimEngine:LaunchBoatAttack(attacker: any, dstRef: number, requestedTroo
 		return false
 	end
 
-	local path = MapCodec.FindWaterPath(map, bestShore, dstRef, 12_000)
+	local path = self:_CachedWaterPath(bestShore, dstRef, 60_000)
 	if path == nil or #path < 2 then
 		return false
 	end
@@ -954,7 +1187,6 @@ function SimEngine:RetreatBoats(attacker: any)
 	for _, u in ipairs(self.units) do
 		if u.active and u.ownerSmallId == attacker.smallId and u.unitType == "TransportShip" and not u.retreating then
 			u.retreating = true
-			-- Reverse remaining path back home!
 			local rev = {}
 			for idx = u.pathIdx, 1, -1 do
 				table.insert(rev, u.path[idx])
@@ -974,17 +1206,16 @@ function SimEngine:CanPlaceStructureNear(p: any, ref: number): boolean
 	end
 	local w = self.map.width
 	local x, y = ref % w, math.floor(ref / w)
-	local minSq = Config.STRUCTURE_MIN_DIST * Config.STRUCTURE_MIN_DIST
-	for _, u in ipairs(self.units) do
-		if u.active and CAPTURABLE_STRUCTURES[u.unitType] then
-			local dx = u.x - x
-			local dy = u.y - y
-			if dx * dx + dy * dy < minSq then
-				return false
-			end
+	local minDist = Config.StructureMinDistScaled(w)
+	local blocked = false
+	self:_ForUnitsInRadius(x, y, minDist, function(u: any)
+		if CAPTURABLE_STRUCTURES[u.unitType] then
+			blocked = true
+			return true
 		end
-	end
-	return true
+		return false
+	end)
+	return not blocked
 end
 
 function SimEngine:FindFirstOwnedUnit(ownerSmallId: number, unitType: UnitType): any
@@ -1026,6 +1257,7 @@ function SimEngine:_CreateUnit(owner: any, unitType: UnitType, x: number, y: num
 		ownerSmallId = owner.smallId,
 		x = x,
 		y = y,
+		_gridCell = 0,
 		srcX = x,
 		srcY = y,
 		dstX = x,
@@ -1060,6 +1292,7 @@ function SimEngine:_CreateUnit(owner: any, unitType: UnitType, x: number, y: num
 			end
 		end
 	end
+	self:_GridInsert(u)
 	table.insert(self.units, u)
 	return u
 end
@@ -1069,6 +1302,7 @@ function SimEngine:_RemoveUnit(u: any)
 		return
 	end
 	u.active = false
+	self:_GridRemove(u)
 	local owner = self.playersBySmallId[u.ownerSmallId]
 	if owner ~= nil then
 		owner.unitCounts[u.unitType] = math.max(0, (owner.unitCounts[u.unitType] or 1) - 1)
@@ -1145,13 +1379,13 @@ function SimEngine:DeleteStructure(player: any, unitId: number): boolean
 	return false
 end
 
--- Build any Structure, Warship, Atom Bomb, Hydrogen Bomb, or MIRV!
 function SimEngine:BuildUnit(player: any, unitType: UnitType, targetRef: number): boolean
-	if self.inSpawnPhase or not player.alive then
+	if self.inSpawnPhase or not player.alive or not Config.IsFiniteNumber(targetRef) then
 		return false
 	end
 	local map = self.map
 	local w, h = map.width, map.height
+	targetRef = math.floor(targetRef)
 	if targetRef < 0 or targetRef >= map.size then
 		return false
 	end
@@ -1167,7 +1401,7 @@ function SimEngine:BuildUnit(player: any, unitType: UnitType, targetRef: number)
 		return false
 	end
 
-	-- 1. Nuclear Missiles (AtomBomb, HydrogenBomb, MIRV) require ready MissileSilo
+	-- 1. Nuclear Missiles (AtomBomb, HydrogenBomb, MIRV)
 	if unitType == "AtomBomb" or unitType == "HydrogenBomb" or unitType == "MIRV" then
 		local bestSilo: any = nil
 		local bestDist = math.huge
@@ -1192,7 +1426,7 @@ function SimEngine:BuildUnit(player: any, unitType: UnitType, targetRef: number)
 		end
 		if not self.config.waterNukes and not MapCodec.IsPlayableLand(map, targetRef) then
 			local snapped: number? = nil
-			for r = 1, 5 do
+			for r = 1, 8 do
 				for dy = -r, r do
 					for dx = -r, r do
 						local nx, ny = tx + dx, ty + dy
@@ -1224,12 +1458,12 @@ function SimEngine:BuildUnit(player: any, unitType: UnitType, targetRef: number)
 		bestSilo.cooldownUntilTick = self.ticks + math.max(15, math.floor(Config.SILO_COOLDOWN_TICKS / bestSilo.level))
 
 		local dist = math.sqrt((bestSilo.x - tx) * (bestSilo.x - tx) + (bestSilo.y - ty) * (bestSilo.y - ty))
-		local speed = if unitType == "MIRV" then 5.5 else 3.8
-		local flightTicks = math.clamp(math.ceil(dist / speed), 24, 160)
+		local speed = (if unitType == "MIRV" then 11.0 else 8.0) * Config.MapScaleFactor(w)
+		local flightTicks = math.clamp(math.ceil(dist / math.max(3.5, speed)), 20, 140)
 
 		if unitType == "MIRV" then
 			self.mirvsLaunched += 1
-			local sepY = math.max(4, ty - 42)
+			local sepY = math.max(4, ty - math.floor(65 * Config.MapScaleFactor(w)))
 			local sepX = math.floor((bestSilo.x + tx) * 0.5)
 			local nukeUnit = self:_CreateUnit(player, "MIRV", bestSilo.x, bestSilo.y, {
 				srcX = bestSilo.x,
@@ -1252,7 +1486,7 @@ function SimEngine:BuildUnit(player: any, unitType: UnitType, targetRef: number)
 				ty
 			)
 			if victim ~= nil and victim.smallId ~= player.smallId then
-				if self.allies ~= nil or player.allies[victim.smallId] ~= nil then
+				if player.allies[victim.smallId] ~= nil then
 					self:BreakAlliance(player, victim)
 				end
 				self.nextAlertId += 1
@@ -1308,7 +1542,7 @@ function SimEngine:BuildUnit(player: any, unitType: UnitType, targetRef: number)
 		end
 	end
 
-	-- 2. Warship requires a completed friendly Port & valid water spawn/patrol point
+	-- 2. Warship
 	if unitType == "Warship" then
 		local bestPort: any = nil
 		local bestDist = math.huge
@@ -1332,7 +1566,7 @@ function SimEngine:BuildUnit(player: any, unitType: UnitType, targetRef: number)
 		local patrolRef = if MapCodec.IsWater(map, targetRef) then targetRef else spawnWater
 		player.gold -= cost
 		local wx, wy = spawnWater % w, math.floor(spawnWater / w)
-		local path = MapCodec.FindWaterPath(map, spawnWater, patrolRef, 8_000) or { spawnWater }
+		local path = self:_CachedWaterPath(spawnWater, patrolRef, 30_000) or { spawnWater }
 		self:_CreateUnit(player, "Warship", wx, wy, {
 			patrolX = patrolRef % w,
 			patrolY = math.floor(patrolRef / w),
@@ -1344,13 +1578,13 @@ function SimEngine:BuildUnit(player: any, unitType: UnitType, targetRef: number)
 		return true
 	end
 
-	-- 3. Port requires coastal land owned by player (snap within radius 5 if player clicked near coast!)
+	-- 3. Port
 	if unitType == "Port" then
 		local chosenRef: number? = nil
 		if MapCodec.GetOwner(map, targetRef) == player.smallId and MapCodec.IsShoreLand(map, targetRef) then
 			chosenRef = targetRef
 		else
-			for r = 1, 6 do
+			for r = 1, 10 do
 				for dy = -r, r do
 					for dx = -r, r do
 						local nx, ny = tx + dx, ty + dy
@@ -1379,15 +1613,15 @@ function SimEngine:BuildUnit(player: any, unitType: UnitType, targetRef: number)
 		return true
 	end
 
-	-- 4. Land Structures (City, Factory, DefensePost, MissileSilo, SAMLauncher) — with smart spiral snap!
+	-- 4. Land Structures
 	if CAPTURABLE_STRUCTURES[unitType] then
 		local chosenRef: number? = nil
 		if self:CanPlaceStructureNear(player, targetRef) then
 			chosenRef = targetRef
 		else
-			for r = 1, 12 do
-				for dy = -r, r do
-					for dx = -r, r do
+			for r = 1, 18 do
+				for dy = -r, r, 2 do
+					for dx = -r, r, 2 do
 						local nx, ny = tx + dx, ty + dy
 						if nx >= 0 and nx < w and ny >= 0 and ny < h then
 							local cand = ny * w + nx
@@ -1428,7 +1662,7 @@ function SimEngine:MoveWarship(player: any, unitId: number, dstX: number, dstY: 
 	for _, u in ipairs(self.units) do
 		if u.active and u.id == unitId and u.ownerSmallId == player.smallId and u.unitType == "Warship" then
 			local curRef = math.floor(u.y) * map.width + math.floor(u.x)
-			local path = MapCodec.FindWaterPath(map, curRef, dstRef, 10_000)
+			local path = self:_CachedWaterPath(curRef, dstRef, 30_000)
 			if path ~= nil then
 				u.patrolX = ix
 				u.patrolY = iy
@@ -1459,25 +1693,27 @@ function SimEngine:_DetonateNuke(nuke: any)
 	local hitCountByOwner: { [number]: number } = {}
 	local y0 = math.max(0, cy - outerR)
 	local y1 = math.min(h - 1, cy + outerR)
-	local x0 = math.max(0, cx - outerR)
-	local x1 = math.min(w - 1, cx + outerR)
 
 	for py = y0, y1 do
 		local dy = py - cy
 		local rowOff = py * w
-		for px = x0, x1 do
-			local dx = px - cx
-			local dSq = dx * dx + dy * dy
+		for dxx = -outerR, outerR do
+			local dSq = dxx * dxx + dy * dy
 			if dSq <= outerSq then
-				if dSq <= innerSq or math.random() < 0.55 then
+				local px = if map.wrapX then ((cx + dxx) % w) else (cx + dxx)
+				if px >= 0 and px < w and (dSq <= innerSq or self:_Rand() < 0.55) then
 					local ref = rowOff + px
 					if not MapCodec.IsImpassable(map, ref) then
 						local prevOwner = MapCodec.GetOwner(map, ref)
 						if prevOwner > 0 then
 							hitCountByOwner[prevOwner] = (hitCountByOwner[prevOwner] or 0) + 1
-							self:ConquerTile(0, ref) -- Destroys structures & resets to Terra Nullius!
+							self:ConquerTile(0, ref)
 						end
 						if MapCodec.IsPlayableLand(map, ref) and MapCodec.SetFallout(map, ref, true) then
+							if not self.inFalloutSet[ref] then
+								self.inFalloutSet[ref] = true
+								table.insert(self.activeFalloutRefs, ref)
+							end
 							self.falloutDeltaCount += 1
 							self.falloutDeltaRefs[self.falloutDeltaCount] = ref
 							self.falloutDeltaStates[self.falloutDeltaCount] = 1
@@ -1488,7 +1724,6 @@ function SimEngine:_DetonateNuke(nuke: any)
 		end
 	end
 
-	-- Apply proportional troop casualties matching EngineConfig.nukeDeathFactor!
 	for oid, lostTiles in pairs(hitCountByOwner) do
 		local victim = self.playersBySmallId[oid]
 		if victim ~= nil and victim.alive then
@@ -1514,8 +1749,7 @@ function SimEngine:_SeparateMIRV(mirvUnit: any)
 	local candidateRefs = {}
 
 	if targetId > 0 then
-		-- Collect sample of target nation's owned tiles across their entire empire!
-		local step = math.max(1, math.floor(map.size / 6000))
+		local step = math.max(1, math.floor(map.size / 8000))
 		for ref = 0, map.size - 1, step do
 			if MapCodec.GetOwner(map, ref) == targetId then
 				table.insert(candidateRefs, ref)
@@ -1523,28 +1757,30 @@ function SimEngine:_SeparateMIRV(mirvUnit: any)
 		end
 	end
 	if #candidateRefs == 0 then
-		-- Area carpet around realTargetX, realTargetY
+		local spread = math.max(45, math.floor(90 * Config.MapScaleFactor(w)))
 		for _ = 1, 32 do
-			local rx = math.clamp(mirvUnit.realTargetX + math.random(-55, 55), 0, w - 1)
-			local ry = math.clamp(mirvUnit.realTargetY + math.random(-55, 55), 0, h - 1)
+			local rx = math.clamp(mirvUnit.realTargetX + self:_RandInt(-spread, spread), 0, w - 1)
+			local ry = math.clamp(mirvUnit.realTargetY + self:_RandInt(-spread, spread), 0, h - 1)
 			if MapCodec.IsPlayableLand(map, ry * w + rx) then
 				table.insert(candidateRefs, ry * w + rx)
 			end
 		end
 	end
 
-	local warheadTotal = math.min(42, math.max(10, #candidateRefs))
-	for k = 1, warheadTotal do
-		local pick = candidateRefs[math.random(1, #candidateRefs)]
-		local wx, wy = pick % w, math.floor(pick / w)
-		self:_CreateUnit(sender, "MIRVWarhead", mirvUnit.x, mirvUnit.y, {
-			srcX = mirvUnit.x,
-			srcY = mirvUnit.y,
-			dstX = wx,
-			dstY = wy,
-			startTick = self.ticks + (k % 8),
-			endTick = self.ticks + 18 + (k % 14),
-		})
+	if #candidateRefs > 0 then
+		local warheadTotal = math.min(36, math.max(10, #candidateRefs))
+		for k = 1, warheadTotal do
+			local pick = candidateRefs[self:_RandInt(1, #candidateRefs)]
+			local wx, wy = pick % w, math.floor(pick / w)
+			self:_CreateUnit(sender, "MIRVWarhead", mirvUnit.x, mirvUnit.y, {
+				srcX = mirvUnit.x,
+				srcY = mirvUnit.y,
+				dstX = wx,
+				dstY = wy,
+				startTick = self.ticks + (k % 8),
+				endTick = self.ticks + 18 + (k % 14),
+			})
+		end
 	end
 end
 
@@ -1562,9 +1798,11 @@ function SimEngine:_RebuildRailNetwork()
 		end
 	end
 	for i = 1, #stations do
-		local a = stations[i]
-		a.railLinks = {}
+		stations[i].railLinks = {}
 	end
+	local sf = Config.MapScaleFactor(self.map.width)
+	local minR = math.max(6, math.floor(Config.TRAIN_STATION_MIN_RANGE * sf))
+	local maxR = math.max(60, math.floor(Config.TRAIN_STATION_MAX_RANGE * sf))
 	local edgeBudget = 0
 	for i = 1, #stations do
 		if edgeBudget >= 45 then
@@ -1575,7 +1813,7 @@ function SimEngine:_RebuildRailNetwork()
 			local b = stations[j]
 			local dx, dy = a.x - b.x, a.y - b.y
 			local dSq = dx * dx + dy * dy
-			if dSq >= 100 and dSq <= Config.TRAIN_STATION_MAX_RANGE * Config.TRAIN_STATION_MAX_RANGE and #a.railLinks < 3 and #b.railLinks < 3 then
+			if dSq >= minR * minR and dSq <= maxR * maxR and #a.railLinks < 3 and #b.railLinks < 3 then
 				local ownerA = self.playersBySmallId[a.ownerSmallId]
 				local ownerB = self.playersBySmallId[b.ownerSmallId]
 				if ownerA ~= nil and ownerB ~= nil and not ownerA.embargoes[ownerB.smallId] and not ownerB.embargoes[ownerA.smallId] then
@@ -1583,7 +1821,7 @@ function SimEngine:_RebuildRailNetwork()
 						self.map,
 						a.y * self.map.width + a.x,
 						b.y * self.map.width + b.x,
-						Config.TRAIN_STATION_MAX_RANGE
+						maxR
 					)
 					if path ~= nil and #path >= 2 then
 						edgeBudget += 1
@@ -1601,7 +1839,6 @@ function SimEngine:_RebuildRailNetwork()
 end
 
 function SimEngine:_TickEconomySpawns()
-	-- 1. TradeShip spawning between open Ports!
 	if self.ticks % 12 == 0 then
 		local openPorts = {}
 		for _, u in ipairs(self.units) do
@@ -1611,9 +1848,9 @@ function SimEngine:_TickEconomySpawns()
 		end
 		if #openPorts >= 2 then
 			for _ = 1, math.min(4, math.ceil(#openPorts / 3)) do
-				local srcPort = openPorts[math.random(1, #openPorts)]
-				local dstPort = openPorts[math.random(1, #openPorts)]
-				if srcPort ~= dstPort and (self.playersBySmallId[srcPort.ownerSmallId] ~= nil) then
+				local srcPort = openPorts[self:_RandInt(1, #openPorts)]
+				local dstPort = openPorts[self:_RandInt(1, #openPorts)]
+				if srcPort ~= dstPort and self.playersBySmallId[srcPort.ownerSmallId] ~= nil then
 					local ownerA = self.playersBySmallId[srcPort.ownerSmallId]
 					local ownerB = self.playersBySmallId[dstPort.ownerSmallId]
 					if
@@ -1624,7 +1861,7 @@ function SimEngine:_TickEconomySpawns()
 						and (ownerA.unitCounts["TradeShip"] or 0) < 8
 					then
 						local w = self.map.width
-						local path = MapCodec.FindWaterPath(self.map, srcPort.y * w + srcPort.x, dstPort.y * w + dstPort.x, 9_000)
+						local path = self:_CachedWaterPath(srcPort.y * w + srcPort.x, dstPort.y * w + dstPort.x, 45_000)
 						if path ~= nil and #path >= 3 then
 							local dist = math.sqrt((srcPort.x - dstPort.x) ^ 2 + (srcPort.y - dstPort.y) ^ 2)
 							self:_CreateUnit(ownerA, "TradeShip", srcPort.x, srcPort.y, {
@@ -1644,7 +1881,6 @@ function SimEngine:_TickEconomySpawns()
 		end
 	end
 
-	-- 2. Train spawning from Factories along connected Railroads!
 	if self.ticks % 16 == 4 then
 		for _, u in ipairs(self.units) do
 			if
@@ -1655,8 +1891,8 @@ function SimEngine:_TickEconomySpawns()
 				and #u.railLinks > 0
 			then
 				local owner = self.playersBySmallId[u.ownerSmallId]
-				if owner ~= nil and (owner.unitCounts["Train"] or 0) < 6 and math.random() < 0.45 then
-					local link = u.railLinks[math.random(1, #u.railLinks)]
+				if owner ~= nil and (owner.unitCounts["Train"] or 0) < 6 and self:_Rand() < 0.45 then
+					local link = u.railLinks[self:_RandInt(1, #u.railLinks)]
 					local orderedPath = {}
 					if link.forward then
 						for i = 1, #link.path do
@@ -1684,6 +1920,9 @@ end
 function SimEngine:_TickUnits()
 	local map = self.map
 	local w = map.width
+	local sf = Config.MapScaleFactor(w)
+	local warshipRange = Config.WarshipRangeScaled(w)
+	local dpShellRange = Config.DefensePostShellRangeScaled(w)
 
 	for _, u in ipairs(self.units) do
 		if not u.active then
@@ -1695,7 +1934,6 @@ function SimEngine:_TickUnits()
 			continue
 		end
 
-		-- Finish construction
 		if u.underConstruction and self.ticks >= u.buildEndTick then
 			u.underConstruction = false
 			self:_AdjustPlayerStructureStats(owner, u.unitType, u.level, u, true)
@@ -1705,27 +1943,26 @@ function SimEngine:_TickUnits()
 		end
 
 		if u.unitType == "TransportShip" then
-			u.pathIdx = math.min(#u.path, u.pathIdx + 1)
+			local boatStep = math.max(2, math.floor(2.6 * sf + 0.5))
+			u.pathIdx = math.min(#u.path, u.pathIdx + boatStep)
 			local curRef = u.path[u.pathIdx]
-			u.x = curRef % w
-			u.y = math.floor(curRef / w)
+			self:_GridUpdatePos(u, curRef % w, math.floor(curRef / w))
 			if u.pathIdx >= #u.path then
 				local survivors = u.troops
 				self:_RemoveUnit(u)
 				if u.retreating then
 					owner.troops = math.min(self:GetMaxTroops(owner), owner.troops + survivors)
 				else
-					-- Amphibious landing!
 					local dstOwnerId = MapCodec.GetOwner(map, u.dstRef)
 					owner.troops += survivors
 					self:StartLandAttack(owner, dstOwnerId, survivors, u.dstRef)
 				end
 			end
 		elseif u.unitType == "TradeShip" then
-			u.pathIdx = math.min(#u.path, u.pathIdx + 1)
+			local shipStep = math.max(2, math.floor(2.0 * sf + 0.5))
+			u.pathIdx = math.min(#u.path, u.pathIdx + shipStep)
 			local curRef = u.path[u.pathIdx]
-			u.x = curRef % w
-			u.y = math.floor(curRef / w)
+			self:_GridUpdatePos(u, curRef % w, math.floor(curRef / w))
 			if u.pathIdx >= #u.path then
 				local dstPort = u.dstPort
 				local payout = Config.TradeShipGold(u.dist, w, self.config.goldMultiplier)
@@ -1741,10 +1978,10 @@ function SimEngine:_TickUnits()
 				self:_RemoveUnit(u)
 			end
 		elseif u.unitType == "Train" then
-			u.pathIdx = math.min(#u.path, u.pathIdx + 2)
+			local stepN = math.max(2, math.floor(3.0 * sf + 0.5))
+			u.pathIdx = math.min(#u.path, u.pathIdx + stepN)
 			local curRef = u.path[u.pathIdx]
-			u.x = curRef % w
-			u.y = math.floor(curRef / w)
+			self:_GridUpdatePos(u, curRef % w, math.floor(curRef / w))
 			if u.pathIdx >= #u.path then
 				local st = u.destStation
 				if st ~= nil and st.active then
@@ -1770,19 +2007,19 @@ function SimEngine:_TickUnits()
 				self:_RemoveUnit(u)
 			end
 		elseif u.unitType == "Warship" then
-			-- Move along current patrol/relocate water path, otherwise orbit patrol point
+			local warStep = math.max(2, math.floor(3.0 * sf + 0.5))
 			if u.path ~= nil and u.pathIdx < #u.path then
-				u.pathIdx = math.min(#u.path, u.pathIdx + 1)
+				u.pathIdx = math.min(#u.path, u.pathIdx + warStep)
 				local curRef = u.path[u.pathIdx]
-				u.x = curRef % w
-				u.y = math.floor(curRef / w)
+				self:_GridUpdatePos(u, curRef % w, math.floor(curRef / w))
 			elseif self.ticks % 25 == (u.id % 25) then
 				local angle = (self.ticks * 0.09 + u.id) % (math.pi * 2)
-				local ox = math.clamp(math.floor(u.patrolX + math.cos(angle) * 10), 0, w - 1)
-				local oy = math.clamp(math.floor(u.patrolY + math.sin(angle) * 10), 0, map.height - 1)
+				local orbitR = math.max(12, math.floor(24 * sf))
+				local ox = math.clamp(math.floor(u.patrolX + math.cos(angle) * orbitR), 0, w - 1)
+				local oy = math.clamp(math.floor(u.patrolY + math.sin(angle) * orbitR), 0, map.height - 1)
 				local oRef = oy * w + ox
 				if MapCodec.IsWater(map, oRef) then
-					local pth = MapCodec.FindWaterPath(map, math.floor(u.y) * w + math.floor(u.x), oRef, 900)
+					local pth = MapCodec.FindWaterPath(map, math.floor(u.y) * w + math.floor(u.x), oRef, 1200)
 					if pth ~= nil then
 						u.path = pth
 						u.pathIdx = 1
@@ -1790,53 +2027,66 @@ function SimEngine:_TickUnits()
 				end
 			end
 
-			-- Passive Port repair!
 			if u.hp < u.maxHp and owner.portLevels > 0 then
 				u.hp = math.min(u.maxHp, u.hp + Config.WARSHIP_PASSIVE_HEAL)
 			end
 
-			-- Fire shells at hostile TransportShips / Warships OR capture hostile TradeShips!
+			-- Spatial O(1) Warship Piracy + Naval Combat!
 			if self.ticks - u.lastShotTick >= Config.WARSHIP_SHELL_RATE_TICKS then
-				local rangeSq = 42 * 42
-				for _, target in ipairs(self.units) do
-					if target.active and target.ownerSmallId ~= owner.smallId then
+				local pirateR2 = math.max(256, (22 * sf) ^ 2)
+				self:_ForUnitsInRadius(u.x, u.y, warshipRange, function(target: any)
+					if target.ownerSmallId ~= owner.smallId then
 						local tOwner = self.playersBySmallId[target.ownerSmallId]
 						if tOwner ~= nil and not self:AreFriendly(owner, tOwner) then
 							local dx, dy = target.x - u.x, target.y - u.y
 							local dSq = dx * dx + dy * dy
-							if dSq <= rangeSq then
-								if target.unitType == "TradeShip" and dSq <= 144 then
-									-- Capture trade ship for piracy gold!
-									local loot = Config.TradeShipGold(target.dist or 100, w, self.config.goldMultiplier)
-									owner.gold += loot
-									owner.goldEarned += loot
-									self:_GrantVeterancyProgress(u, 2)
+							if target.unitType == "TradeShip" and dSq <= pirateR2 then
+								local loot = Config.TradeShipGold(target.dist or 100, w, self.config.goldMultiplier)
+								owner.gold += loot
+								owner.goldEarned += loot
+								self:_GrantVeterancyProgress(u, 2)
+								self:_RemoveUnit(target)
+								return true
+							elseif target.unitType == "TransportShip" or target.unitType == "Warship" then
+								u.lastShotTick = self.ticks
+								local dmg = math.floor(Config.WARSHIP_SHELL_DAMAGE * (1 + u.veterancy * 0.2))
+								target.hp -= dmg
+								if target.hp <= 0 then
+									self:_GrantVeterancyProgress(u, 4)
 									self:_RemoveUnit(target)
-									break
-								elseif target.unitType == "TransportShip" or target.unitType == "Warship" then
-									u.lastShotTick = self.ticks
-									local dmg = math.floor(Config.WARSHIP_SHELL_DAMAGE * (1 + u.veterancy * 0.2))
-									target.hp -= dmg
-									if target.hp <= 0 then
-										self:_GrantVeterancyProgress(u, 4)
-										self:_RemoveUnit(target)
-									end
-									break
 								end
+								return true
 							end
 						end
 					end
-				end
+					return false
+				end)
+			end
+		elseif u.unitType == "DefensePost" and not u.underConstruction then
+			-- Coastal Battery Shelling against hostile amphibious fleets!
+			if self.ticks - u.lastShotTick >= Config.DEFENSE_POST_SHELL_RATE then
+				self:_ForUnitsInRadius(u.x, u.y, dpShellRange, function(target: any)
+					if target.ownerSmallId ~= owner.smallId and (target.unitType == "TransportShip" or target.unitType == "Warship") then
+						local tOwner = self.playersBySmallId[target.ownerSmallId]
+						if tOwner == nil or not self:AreFriendly(owner, tOwner) then
+							u.lastShotTick = self.ticks
+							target.hp -= 125
+							if target.hp <= 0 then
+								self:_RemoveUnit(target)
+							end
+							return true
+						end
+					end
+					return false
+				end)
 			end
 		elseif u.unitType == "SAMLauncher" and not u.underConstruction then
-			-- Scan for incoming hostile nuclear missiles within rational SAM range!
+			-- Spatial O(1) SAM Lock Reservation (`targetedBySam` prevents duplicate interceptor waste!)
 			if self.ticks >= u.cooldownUntilTick then
-				local samR = Config.SamRange(u.level) * math.clamp(w / 700, 0.55, 1.0)
-				local samSq = samR * samR
-				for _, missile in ipairs(self.units) do
+				local samR = Config.SamRangeScaled(u.level, w)
+				self:_ForUnitsInRadius(u.x, u.y, samR, function(missile: any)
 					if
-						missile.active
-						and not missile.targetedBySam
+						not missile.targetedBySam
 						and (
 							missile.unitType == "AtomBomb"
 							or missile.unitType == "HydrogenBomb"
@@ -1845,22 +2095,20 @@ function SimEngine:_TickUnits()
 					then
 						local mOwner = self.playersBySmallId[missile.ownerSmallId]
 						if mOwner == nil or not self:AreFriendly(owner, mOwner) then
-							local dx, dy = missile.x - u.x, missile.y - u.y
-							if dx * dx + dy * dy <= samSq then
-								missile.targetedBySam = true
-								u.cooldownUntilTick = self.ticks + Config.SAM_COOLDOWN_TICKS
-								self:_CreateUnit(owner, "SAMMissile", u.x, u.y, {
-									srcX = u.x,
-									srcY = u.y,
-									targetMissile = missile,
-									startTick = self.ticks,
-									endTick = self.ticks + 8,
-								})
-								break
-							end
+							missile.targetedBySam = true
+							u.cooldownUntilTick = self.ticks + Config.SAM_COOLDOWN_TICKS
+							self:_CreateUnit(owner, "SAMMissile", u.x, u.y, {
+								srcX = u.x,
+								srcY = u.y,
+								targetMissile = missile,
+								startTick = self.ticks,
+								endTick = self.ticks + 8,
+							})
+							return true
 						end
 					end
-				end
+					return false
+				end)
 			end
 		elseif u.unitType == "SAMMissile" then
 			local m = u.targetMissile
@@ -1869,10 +2117,9 @@ function SimEngine:_TickUnits()
 			else
 				local t = math.clamp((self.ticks - u.startTick) / math.max(1, u.endTick - u.startTick), 0, 1)
 				u.progress = t
-				u.x = u.srcX + (m.x - u.srcX) * t
-				u.y = u.srcY + (m.y - u.srcY) * t
+				self:_GridUpdatePos(u, u.srcX + (m.x - u.srcX) * t, u.srcY + (m.y - u.srcY) * t)
 				if t >= 1 then
-					self:_RemoveUnit(m) -- Intercepted in midair!
+					self:_RemoveUnit(m)
 					self:_RemoveUnit(u)
 				end
 			end
@@ -1886,9 +2133,12 @@ function SimEngine:_TickUnits()
 				local dur = math.max(1, u.endTick - u.startTick)
 				local t = math.clamp((self.ticks - u.startTick) / dur, 0, 1)
 				u.progress = t
-				local arcLift = math.sin(t * math.pi) * (if u.unitType == "MIRV" then 34 else 20)
-				u.x = u.srcX + (u.dstX - u.srcX) * t
-				u.y = u.srcY + (u.dstY - u.srcY) * t - arcLift
+				local arcLift = math.sin(t * math.pi) * (if u.unitType == "MIRV" then 48 else 28)
+				self:_GridUpdatePos(
+					u,
+					u.srcX + (u.dstX - u.srcX) * t,
+					math.clamp(u.srcY + (u.dstY - u.srcY) * t - arcLift, 0, map.height - 1)
+				)
 				if t >= 1 then
 					if u.unitType == "MIRV" then
 						self:_SeparateMIRV(u)
@@ -1901,7 +2151,6 @@ function SimEngine:_TickUnits()
 		end
 	end
 
-	-- Compact unit list periodically
 	if self.ticks % 20 == 0 then
 		local writeIdx = 0
 		for i = 1, #self.units do
@@ -1927,7 +2176,6 @@ function SimEngine:_GrantVeterancyProgress(warship: any, pts: number)
 	end
 end
 
--- Diplomacy & Player Actions
 function SimEngine:SendAllianceRequest(fromP: any, toP: any): boolean
 	if self.config.disableAlliances or not fromP.alive or not toP.alive or self:AreFriendly(fromP, toP) then
 		return false
@@ -1937,10 +2185,9 @@ function SimEngine:SendAllianceRequest(fromP: any, toP: any): boolean
 	end
 	fromP.lastAllianceReqTick = self.ticks
 
-	-- If recipient is an AI Nation, decide immediately based on relation & relative strength!
 	if toP.playerType == "Nation" then
 		local rel = toP.relations[fromP.smallId] or 0
-		if not fromP.isTraitor and rel > -30 and math.random() < 0.72 then
+		if not fromP.isTraitor and rel > -30 and self:_Rand() < 0.72 then
 			self:FormAlliance(fromP, toP)
 			self:SetEmoji(toP, "🤝")
 			return true
@@ -1994,7 +2241,7 @@ function SimEngine:BreakAlliance(breaker: any, partner: any)
 end
 
 function SimEngine:DonateResources(sender: any, recipient: any, kind: "gold" | "troops", amount: number): boolean
-	if not sender.alive or not recipient.alive or sender == recipient then
+	if not sender.alive or not recipient.alive or sender == recipient or not Config.IsFiniteNumber(amount) then
 		return false
 	end
 	if self.ticks - sender.lastDonateTick < 15 then
@@ -2026,6 +2273,10 @@ function SimEngine:DonateResources(sender: any, recipient: any, kind: "gold" | "
 end
 
 function SimEngine:SetEmoji(player: any, emoji: string)
+	if self.ticks - player.lastEmojiTick < Config.EMOJI_COOLDOWN_TICKS then
+		return
+	end
+	player.lastEmojiTick = self.ticks
 	player.emoji = emoji
 	player.emojiUntilTick = self.ticks + Config.EMOJI_DURATION_TICKS
 end
@@ -2045,7 +2296,6 @@ function SimEngine:PickHostileTargetForNuke(p: any): any
 	return best
 end
 
--- Absorbs isolated 1-tile speckles surrounded on >=3 sides by a single empire (+ water) for silky OpenFront borders!
 function SimEngine:_SweepPocketSpeckles()
 	local map = self.map
 	local nbuf = { 0, 0, 0, 0 }
@@ -2053,7 +2303,7 @@ function SimEngine:_SweepPocketSpeckles()
 	for _, p in ipairs(self.playersList) do
 		if p.alive and #p.borderList > 0 then
 			local bLen = #p.borderList
-			local limit = math.min(bLen, 160)
+			local limit = math.min(bLen, 220)
 			local startIdx = ((self.ticks * 13) % bLen) + 1
 			for s = 0, limit - 1 do
 				local bRef = p.borderList[((startIdx + s - 1) % bLen) + 1]
@@ -2087,13 +2337,11 @@ function SimEngine:_SweepPocketSpeckles()
 	end
 end
 
--- Master 10Hz Simulation Step
 function SimEngine:Step()
 	if self.gameOver then
 		return
 	end
 
-	-- Safety bound if stepped headless thousands of times without consuming deltas via BuildTickPayload(false)
 	if self.deltaCount > self.map.size * 2 then
 		self.deltaCount = 0
 	end
@@ -2109,7 +2357,13 @@ function SimEngine:Step()
 		if self.ticks >= self.spawnPhaseTicks then
 			self.inSpawnPhase = false
 			self:_FinalizeSpawns()
-			self:PushEvent("info", "⚔️ Borders unlocked! Conquer " .. tostring(Config.PERCENT_TILES_TO_WIN) .. "% of land to win!", "#38bdf8", nil, nil)
+			self:PushEvent(
+				"info",
+				string.format("⚔️ Borders unlocked on %s (%dx%d)!", self.map.name, self.map.width, self.map.height),
+				"#38bdf8",
+				nil,
+				nil
+			)
 		end
 		return
 	end
@@ -2117,14 +2371,22 @@ function SimEngine:Step()
 	local elapsedSeconds = (self.ticks - self.spawnPhaseTicks) / Config.TICKS_PER_SECOND
 	local doomReqShare = Config.DoomsdayRequiredShare(self.config, elapsedSeconds)
 
-	-- 1. Passive Troop Growth, Gold Income, Timers & Doomsday Clock
 	for _, p in ipairs(self.playersList) do
 		if p.alive then
 			p.survivedTicks += 1
 			local maxT = self:GetMaxTroops(p)
 			p.troops += Config.TroopIncreasePerTick(p.troops, maxT, p.playerType, self.config)
-			p.gold += Config.GoldPerTick(p.playerType, self.config)
-			p.goldEarned += Config.GoldPerTick(p.playerType, self.config)
+			local g = Config.GoldPerTick(
+				p.playerType,
+				self.config,
+				p.troops,
+				p.tilesOwned,
+				p.cityLevels,
+				p.portLevels,
+				p.factoryLevels
+			)
+			p.gold += g
+			p.goldEarned += g
 
 			if p.isTraitor and self.ticks >= p.traitorUntilTick then
 				p.isTraitor = false
@@ -2133,7 +2395,6 @@ function SimEngine:Step()
 				p.emoji = nil
 			end
 
-			-- Expire alliances & send extension prompt 20s before expiry
 			for allyId, expTick in pairs(p.allies) do
 				if self.ticks >= expTick then
 					p.allies[allyId] = nil
@@ -2152,14 +2413,12 @@ function SimEngine:Step()
 				end
 			end
 
-			-- Expire target pings
 			for tid, expTick in pairs(p.targetedBy) do
 				if self.ticks >= expTick then
 					p.targetedBy[tid] = nil
 				end
 			end
 
-			-- Doomsday Clock check
 			if doomReqShare > 0 then
 				local share = p.tilesOwned / math.max(1, self.map.numLandTiles)
 				if share < doomReqShare then
@@ -2167,7 +2426,6 @@ function SimEngine:Step()
 					if p.doomWarnStartTick < 0 then
 						p.doomWarnStartTick = self.ticks
 					elseif self.ticks - p.doomWarnStartTick > 150 then
-						-- Drain down to 5% floor!
 						local floorT = maxT * 0.05
 						if p.troops > floorT then
 							p.troops = math.max(floorT, p.troops - maxT * 0.004)
@@ -2181,35 +2439,51 @@ function SimEngine:Step()
 		end
 	end
 
-	-- 2. AI Nations & Minor Bots Brain
 	AiBrain.StepAll(self, self.ticks)
 
-	-- 3. Frontier Attacks + Clean Pocket Consolidation Sweep
 	self:_TickAttacks()
 	if self.ticks % 8 == 0 then
 		self:_SweepPocketSpeckles()
 	end
 
-	-- 4. Railroads, Trade Ships, Trains, Warships, Missiles & SAM Interceptors
 	if self.railNetworkDirty and self.ticks % 10 == 0 then
 		self:_RebuildRailNetwork()
 	end
 	self:_TickEconomySpawns()
 	self:_TickUnits()
 
-	-- 5. Slow Fallout Cleanup (gradual environmental recovery)
-	if self.map.numFalloutTiles > 0 and self.ticks % 8 == 0 then
-		for _ = 1, 20 do
-			local ref = math.random(0, self.map.size - 1)
-			if MapCodec.HasFallout(self.map, ref) and MapCodec.SetFallout(self.map, ref, false) then
-				self.falloutDeltaCount += 1
-				self.falloutDeltaRefs[self.falloutDeltaCount] = ref
-				self.falloutDeltaStates[self.falloutDeltaCount] = 0
+	-- Sparse Active Fallout Decay (`O(activeCraters)` instead of scanning `8,002,384` tiles!)
+	if #self.activeFalloutRefs > 0 and self.ticks % 12 == 0 then
+		local active = self.activeFalloutRefs
+		local samples = math.min(#active, 24)
+		for _ = 1, samples do
+			local idx = self:_RandInt(1, #active)
+			local ref = active[idx]
+			if MapCodec.HasFallout(self.map, ref) then
+				if self:_Rand() < 0.14 and MapCodec.SetFallout(self.map, ref, false) then
+					self.falloutDeltaCount += 1
+					self.falloutDeltaRefs[self.falloutDeltaCount] = ref
+					self.falloutDeltaStates[self.falloutDeltaCount] = 0
+					self.inFalloutSet[ref] = nil
+					local last = active[#active]
+					active[idx] = last
+					active[#active] = nil
+					if #active == 0 then
+						break
+					end
+				end
+			else
+				self.inFalloutSet[ref] = nil
+				local last = active[#active]
+				active[idx] = last
+				active[#active] = nil
+				if #active == 0 then
+					break
+				end
 			end
 		end
 	end
 
-	-- 6. Recompute Maximal Inscribed Territory Label Anchors every 10 ticks (1.0s)
 	if self.ticks % 10 == 2 then
 		local bx, by, bspan = MapCodec.ComputeAllLabelBoxes(self.map, self.nextSmallId)
 		for sid = 1, self.nextSmallId do
@@ -2222,7 +2496,6 @@ function SimEngine:Step()
 		end
 	end
 
-	-- 7. Win Condition Check (80% Land Share or Overtime Decayed Share, or Last Surviving Side!)
 	if self.ticks % 10 == 5 and not self.isPreview then
 		local reqPct = Config.WinPercentageRequired(self.config, elapsedSeconds)
 		local totalLand = math.max(1, self.map.numLandTiles)
@@ -2272,13 +2545,15 @@ function SimEngine:Step()
 	end
 end
 
--- Build compact state payload for network broadcast
 function SimEngine:BuildTickPayload(includeFullMap: boolean)
 	local tileBuf = if includeFullMap
 		then NetCodec.EncodeFullOwnerSnapshot(self.map.owner, self.map.size)
 		else NetCodec.EncodeTileDeltas(self.deltaRefs, self.deltaOwners, self.deltaCount)
 	local falloutBuf = if self.falloutDeltaCount > 0
 		then NetCodec.EncodeFalloutDeltas(self.falloutDeltaRefs, self.falloutDeltaStates, self.falloutDeltaCount)
+		else nil
+	local falloutSnapshot = if includeFullMap
+		then NetCodec.EncodeFullFalloutSnapshot(self.map.fallout, self.map.size)
 		else nil
 	local explosionsOut = table.clone(self.explosions)
 	if not includeFullMap then
@@ -2287,7 +2562,6 @@ function SimEngine:BuildTickPayload(includeFullMap: boolean)
 		table.clear(self.explosions)
 	end
 
-	-- Aggregate outgoing attack totals per attacker
 	local outTroops: { [number]: number } = {}
 	local activeAttacksList = {}
 	for _, atk in ipairs(self.attacks) do
@@ -2300,6 +2574,7 @@ function SimEngine:BuildTickPayload(includeFullMap: boolean)
 					attackerSmallId = atk.attackerSmallId,
 					targetSmallId = atk.targetSmallId,
 					troops = math.floor(atk.troops),
+					retreating = atk.retreating == true,
 					isBoat = atk.isBoat,
 				})
 			end
@@ -2308,7 +2583,6 @@ function SimEngine:BuildTickPayload(includeFullMap: boolean)
 
 	local playersOut = table.create(#self.playersList)
 	for i, p in ipairs(self.playersList) do
-		-- Compact non-bot full metadata + essential stats for bots
 		local alliesArr = {}
 		for aid, _ in pairs(p.allies) do
 			table.insert(alliesArr, aid)
@@ -2399,9 +2673,12 @@ function SimEngine:BuildTickPayload(includeFullMap: boolean)
 		winPercentRequired = Config.WinPercentageRequired(self.config, elapsedSeconds),
 		doomsdayShare = Config.DoomsdayRequiredShare(self.config, elapsedSeconds),
 		mirvsLaunched = self.mirvsLaunched,
+		simSpeed = self.simSpeed,
+		paused = self.paused,
 		config = self.config,
 		tileBuffer = tileBuf,
 		falloutBuffer = falloutBuf,
+		falloutSnapshot = falloutSnapshot,
 		players = playersOut,
 		units = unitsOut,
 		attacks = activeAttacksList,

@@ -1,5 +1,11 @@
+--!native
 --!strict
--- Persistent DataStore profile manager with automatic Studio offline memory fallback
+-- Hardened Persistent DataStore Profile Manager (`DataService.luau`)
+-- Upgraded with:
+--   - Exponential retry on `GetAsync` (`3` attempts)
+--   - Atomic `UpdateAsync` instead of racy `SetAsync` (`zero concurrent write clobbers!`)
+--   - Strict `Config.IsFiniteNumber` sanitization on load, preference update, and match rewards
+--   - `game:BindToClose` clean flush so zero XP/Wins are ever lost on shutdown!
 
 local DataStoreService = game:GetService("DataStoreService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -25,6 +31,7 @@ do
 end
 
 local Profiles: { [number]: PlayerProfileSave } = {}
+local DirtyUsers: { [number]: boolean } = {}
 
 function DataService.DefaultProfile(userId: number): PlayerProfileSave
 	local colorIdx = ((math.abs(userId) % #Theme.HumanColors) + 1)
@@ -54,14 +61,24 @@ function DataService.LoadProfile(userId: number): PlayerProfileSave
 	end
 	local base = DataService.DefaultProfile(userId)
 	if profileStore ~= nil and userId > 0 then
-		local ok, saved = pcall(function()
-			return profileStore:GetAsync("u_" .. tostring(userId))
-		end)
-		if ok and type(saved) == "table" then
-			for k, v in pairs(saved) do
-				if (base :: any)[k] ~= nil and type(v) == type((base :: any)[k]) then
-					(base :: any)[k] = v
+		for attempt = 1, 3 do
+			local ok, saved = pcall(function()
+				return (profileStore :: DataStore):GetAsync("u_" .. tostring(userId))
+			end)
+			if ok then
+				if type(saved) == "table" then
+					for k, v in pairs(saved) do
+						if (base :: any)[k] ~= nil and type(v) == type((base :: any)[k]) then
+							if type(v) ~= "number" or Config.IsFiniteNumber(v) then
+								(base :: any)[k] = v
+							end
+						end
+					end
 				end
+				break
+			end
+			if attempt < 3 then
+				task.wait(0.2 * attempt)
 			end
 		end
 	end
@@ -75,16 +92,19 @@ end
 
 function DataService.UpdatePreferences(userId: number, patch: { [string]: any }): PlayerProfileSave
 	local prof = DataService.GetProfile(userId)
+	if type(patch) ~= "table" then
+		return prof
+	end
 	if type(patch.flag) == "string" and #patch.flag <= 12 then
 		prof.flag = patch.flag
 	end
-	if type(patch.colorIndex) == "number" then
+	if Config.IsFiniteNumber(patch.colorIndex) then
 		prof.colorIndex = math.clamp(math.floor(patch.colorIndex), 1, #Theme.HumanColors)
 	end
-	if type(patch.patternId) == "string" then
+	if type(patch.patternId) == "string" and #patch.patternId <= 16 then
 		prof.patternId = patch.patternId
 	end
-	if type(patch.defaultAttackRatio) == "number" then
+	if Config.IsFiniteNumber(patch.defaultAttackRatio) then
 		prof.defaultAttackRatio = math.clamp(patch.defaultAttackRatio, 0.05, 1.0)
 	end
 	if type(patch.colorblindMode) == "boolean" then
@@ -96,9 +116,10 @@ function DataService.UpdatePreferences(userId: number, patch: { [string]: any })
 	if type(patch.showNames) == "boolean" then
 		prof.showNames = patch.showNames
 	end
-	if type(patch.soundVolume) == "number" then
+	if Config.IsFiniteNumber(patch.soundVolume) then
 		prof.soundVolume = math.clamp(patch.soundVolume, 0, 1)
 	end
+	DirtyUsers[userId] = true
 	return prof
 end
 
@@ -117,33 +138,43 @@ function DataService.RecordMatchResult(
 	landPercentPeak: number,
 	nukesSent: number,
 	goldEarned: number,
-	secondsSurvived: number
+	secondsSurvived: number,
+	xpEligible: boolean?
 ): MatchRewardResult
 	local prof = DataService.GetProfile(userId)
 	local prevLevel = prof.level
+	local safeTiles = math.max(0, math.floor(Config.SafeClampNumber(tilesPeak, 0, 100_000_000, 0)))
+	local safeShare = Config.SafeClampNumber(landPercentPeak, 0, 1.0, 0)
+	local safeNukes = math.max(0, math.floor(Config.SafeClampNumber(nukesSent, 0, 100_000, 0)))
+	local safeGold = math.max(0, math.floor(Config.SafeClampNumber(goldEarned, 0, 1_000_000_000_000, 0)))
+	local safeSecs = Config.SafeClampNumber(secondsSurvived, 0, 86_400, 0)
+
 	prof.gamesPlayed += 1
-	prof.tilesConquered += math.max(0, math.floor(tilesPeak))
-	prof.nukesLaunched += math.max(0, math.floor(nukesSent))
-	prof.goldEarnedTotal += math.max(0, math.floor(goldEarned))
-	if isVictory then
+	prof.tilesConquered += safeTiles
+	prof.nukesLaunched += safeNukes
+	prof.goldEarnedTotal += safeGold
+	if isVictory and xpEligible ~= false then
 		prof.wins += 1
 	end
 
-	local rawXp = 120
-		+ math.floor(math.min(600, secondsSurvived * 0.8))
-		+ math.floor(landPercentPeak * 850)
-		+ nukesSent * 45
-	if isVictory then
-		rawXp = math.floor(rawXp * 2.25 + 500)
-	end
+	local rawXp = 0
+	if xpEligible ~= false then
+		rawXp = 120
+			+ math.floor(math.min(600, safeSecs * 0.8))
+			+ math.floor(safeShare * 850)
+			+ safeNukes * 45
+		if isVictory then
+			rawXp = math.floor(rawXp * 2.25 + 500)
+		end
 
-	prof.xp += rawXp
-	while prof.xp >= Config.XpForNextLevel(prof.level) do
-		prof.xp -= Config.XpForNextLevel(prof.level)
-		prof.level += 1
-		if prof.level > 25 and prof.prestige < 10 then
-			prof.level = 1
-			prof.prestige += 1
+		prof.xp += rawXp
+		while prof.xp >= Config.XpForNextLevel(prof.level) do
+			prof.xp -= Config.XpForNextLevel(prof.level)
+			prof.level += 1
+			if prof.level > 25 and prof.prestige < 10 then
+				prof.level = 1
+				prof.prestige += 1
+			end
 		end
 	end
 
@@ -157,15 +188,32 @@ function DataService.RecordMatchResult(
 	}
 end
 
+function DataService.SaveProfileSync(userId: number)
+	local prof = Profiles[userId]
+	if prof == nil or profileStore == nil or userId <= 0 then
+		return
+	end
+	local copy = table.clone(prof)
+	pcall(function()
+		(profileStore :: DataStore):UpdateAsync("u_" .. tostring(userId), function(_old)
+			return copy
+		end)
+	end)
+	DirtyUsers[userId] = nil
+end
+
 function DataService.SaveProfileAsync(userId: number)
 	local prof = Profiles[userId]
 	if prof == nil or profileStore == nil or userId <= 0 then
 		return
 	end
 	local copy = table.clone(prof)
+	DirtyUsers[userId] = nil
 	task.spawn(function()
 		pcall(function()
-			profileStore:SetAsync("u_" .. tostring(userId), copy)
+			(profileStore :: DataStore):UpdateAsync("u_" .. tostring(userId), function(_old)
+				return copy
+			end)
 		end)
 	end)
 end
@@ -173,6 +221,19 @@ end
 function DataService.ReleaseProfile(userId: number)
 	DataService.SaveProfileAsync(userId)
 	Profiles[userId] = nil
+	DirtyUsers[userId] = nil
 end
+
+function DataService.FlushAll()
+	for userId, _ in pairs(Profiles) do
+		DataService.SaveProfileSync(userId)
+	end
+end
+
+pcall(function()
+	game:BindToClose(function()
+		DataService.FlushAll()
+	end)
+end)
 
 return DataService

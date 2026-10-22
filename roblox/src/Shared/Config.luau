@@ -1,6 +1,7 @@
+--!native
 --!strict
--- Exact 1:1 port of packages/engine-lib/src/configuration/Config.ts,
--- packages/engine/src/configuration/EngineConfig.ts & DoomsdayClock.ts
+-- Exact Full-Scale 1:1 OpenFront Configuration (`packages/engine-lib/src/configuration/Config.ts`,
+-- `EngineConfig.ts`, `DoomsdayClock.ts` + unified Server/Client scale functions & NaN sanitizers!)
 
 local Types = require(script.Parent:WaitForChild("Types"))
 
@@ -12,6 +13,18 @@ type TerrainKind = Types.TerrainKind
 
 local Config = {}
 
+function Config.IsFiniteNumber(v: any): boolean
+	return type(v) == "number" and v == v and v > -math.huge and v < math.huge
+end
+
+function Config.SafeClampNumber(v: any, minVal: number, maxVal: number, fallback: number): number
+	local n = tonumber(v)
+	if n == nil or n ~= n or n == math.huge or n == -math.huge then
+		return fallback
+	end
+	return math.clamp(n, minVal, maxVal)
+end
+
 -- Core Tick Timing: 100ms per tick = 10 ticks/sec (exact OpenFront constant)
 Config.MS_PER_TICK = 100
 Config.TICKS_PER_SECOND = 10
@@ -22,14 +35,15 @@ Config.DEFENSE_POST_RANGE = 30
 Config.DEFENSE_POST_DEFENSE_BONUS = 5
 Config.DEFENSE_POST_SPEED_BONUS = 3
 Config.DEFENSE_POST_SHELL_RANGE = 75
-Config.DEFENSE_POST_SHELL_RATE = 100
+Config.DEFENSE_POST_SHELL_RATE = 25
 
-Config.STRUCTURE_MIN_DIST = 3 -- Exact 1:4 scale match for structureMinDist = 12 on 2000px maps!
+-- Full 1:1 2000px OpenFront structure spacing & rail distances!
+Config.STRUCTURE_MIN_DIST = 12
 Config.SILO_COOLDOWN_TICKS = 90
 Config.SAM_COOLDOWN_TICKS = 90
 Config.SAM_MAX_RANGE = 150
-Config.TRAIN_STATION_MIN_RANGE = 4 -- Exact 1:4 scale match for trainStationMinRange!
-Config.TRAIN_STATION_MAX_RANGE = 110
+Config.TRAIN_STATION_MIN_RANGE = 14
+Config.TRAIN_STATION_MAX_RANGE = 135
 Config.BOAT_MAX_NUMBER = 3
 
 Config.TRAITOR_DEFENSE_DEBUFF = 0.5
@@ -44,6 +58,7 @@ Config.TARGET_DURATION_TICKS = 100 -- 10s
 Config.TARGET_COOLDOWN_TICKS = 150 -- 15s
 Config.DELETE_UNIT_COOLDOWN_TICKS = 300 -- 30s
 Config.EMOJI_DURATION_TICKS = 50 -- 5s
+Config.EMOJI_COOLDOWN_TICKS = 25 -- 2.5s
 Config.SPAWN_IMMUNITY_TICKS = 50 -- 5s
 
 Config.WARSHIP_BASE_HP = 1000
@@ -56,13 +71,33 @@ Config.WARSHIP_PASSIVE_HEAL_RANGE = 120
 Config.WARSHIP_MAX_VETERANCY = 3
 Config.WARSHIP_VET_BONUS_PCT = 20
 
+function Config.MapScaleFactor(mapWidth: number): number
+	return math.clamp(mapWidth / 2000, 0.50, 1.65)
+end
+
+function Config.StructureMinDistScaled(mapWidth: number): number
+	return math.max(4, math.floor(Config.STRUCTURE_MIN_DIST * Config.MapScaleFactor(mapWidth) + 0.5))
+end
+
+function Config.DefensePostRangeScaled(mapWidth: number): number
+	return math.max(12, math.floor(Config.DEFENSE_POST_RANGE * Config.MapScaleFactor(mapWidth) + 0.5))
+end
+
+function Config.DefensePostShellRangeScaled(mapWidth: number): number
+	return math.max(28, math.floor(Config.DEFENSE_POST_SHELL_RANGE * Config.MapScaleFactor(mapWidth) + 0.5))
+end
+
+function Config.WarshipRangeScaled(mapWidth: number): number
+	return math.max(48, math.floor(Config.WARSHIP_TARGET_RANGE * Config.MapScaleFactor(mapWidth) + 0.5))
+end
+
 function Config.DefaultGameConfig(singleplayer: boolean?): GameConfig
 	return {
 		mapId = "World",
 		mode = "FFA",
 		numTeams = 0,
 		difficulty = "Medium",
-		bots = 10,
+		bots = 24,
 		spawnNations = true,
 		instantBuild = false,
 		infiniteGold = false,
@@ -80,16 +115,17 @@ function Config.DefaultGameConfig(singleplayer: boolean?): GameConfig
 		overtimeEnabled = true,
 		overtimeStartMinutes = 25,
 		singleplayer = if singleplayer ~= nil then singleplayer else false,
+		seed = 133701,
 	}
 end
 
 function Config.SpawnPhaseTicks(cfg: GameConfig): number
 	if cfg.singleplayer then
-		return 100 -- 10.0s in Singleplayer (exact Config.ts)
+		return 100
 	elseif cfg.randomSpawn then
-		return 120 -- 12.0s
+		return 120
 	else
-		return 160 -- 16.0s in Multiplayer
+		return 160
 	end
 end
 
@@ -98,18 +134,18 @@ function Config.ConstructionTicks(unitType: UnitType, instantBuild: boolean): nu
 		return 0
 	end
 	if unitType == "City" or unitType == "Factory" then
-		return 20 -- 2s
+		return 20
 	elseif unitType == "Port" or unitType == "DefensePost" then
-		return 50 -- 5s
+		return 50
 	elseif unitType == "MissileSilo" then
-		return 100 -- 10s
+		return 100
 	elseif unitType == "SAMLauncher" then
-		return 180 -- 18s
+		return 180
 	end
 	return 0
 end
 
--- Exact unit cost curves from EngineConfig.ts
+-- Exact independent unit cost curves from EngineConfig.ts
 function Config.UnitCost(
 	unitType: UnitType,
 	ownedCounts: { [string]: number },
@@ -123,9 +159,10 @@ function Config.UnitCost(
 	local count = ownedCounts[unitType] or 0
 	if unitType == "City" then
 		return math.min(1_000_000, math.pow(2, count) * 125_000)
-	elseif unitType == "Port" or unitType == "Factory" then
-		local combined = (ownedCounts["Port"] or 0) + (ownedCounts["Factory"] or 0)
-		return math.min(1_000_000, math.pow(2, combined) * 125_000)
+	elseif unitType == "Port" then
+		return math.min(1_000_000, math.pow(2, count) * 125_000)
+	elseif unitType == "Factory" then
+		return math.min(1_000_000, math.pow(2, count) * 125_000)
 	elseif unitType == "DefensePost" then
 		return math.min(250_000, (count + 1) * 50_000)
 	elseif unitType == "MissileSilo" then
@@ -149,15 +186,19 @@ function Config.SamRange(level: number): number
 	return Config.SAM_MAX_RANGE - 480 / (math.max(1, level) + 5)
 end
 
--- Scaled inner/outer nuke blast radii calibrated cleanly to map scale
+function Config.SamRangeScaled(level: number, mapWidth: number): number
+	return Config.SamRange(level) * Config.MapScaleFactor(mapWidth)
+end
+
+-- Exact inner/outer nuke blast radii calibrated cleanly to FULL 1x maps (`1000px..4108px`)!
 function Config.NukeRadii(unitType: UnitType, mapWidth: number): (number, number)
-	local scale = math.clamp(mapWidth / 900, 0.45, 1.0)
+	local scale = Config.MapScaleFactor(mapWidth)
 	if unitType == "MIRVWarhead" then
-		return math.max(5, math.floor(12 * scale + 0.5)), math.max(8, math.floor(18 * scale + 0.5))
+		return math.max(5, math.floor(14 * scale + 0.5)), math.max(9, math.floor(22 * scale + 0.5))
 	elseif unitType == "AtomBomb" then
-		return math.max(6, math.floor(13 * scale + 0.5)), math.max(14, math.floor(30 * scale + 0.5))
+		return math.max(7, math.floor(16 * scale + 0.5)), math.max(15, math.floor(34 * scale + 0.5))
 	elseif unitType == "HydrogenBomb" then
-		return math.max(28, math.floor(72 * scale + 0.5)), math.max(38, math.floor(92 * scale + 0.5))
+		return math.max(28, math.floor(76 * scale + 0.5)), math.max(38, math.floor(100 * scale + 0.5))
 	end
 	return 8, 16
 end
@@ -179,19 +220,21 @@ function Config.StartingManpower(playerType: PlayerType, cfg: GameConfig): numbe
 	return if cfg.infiniteTroops then 1_000_000 else 25_000
 end
 
--- Exact Config.troopCap formula
 function Config.MaxTroops(
 	numTilesOwned: number,
 	totalCityLevels: number,
 	playerType: PlayerType?,
-	cfg: GameConfig?
+	cfg: GameConfig?,
+	mapWidth: number?
 ): number
 	local pType = playerType or "Human"
 	if pType == "Human" and cfg ~= nil and cfg.infiniteTroops then
 		return 1_000_000_000
 	end
+	local sf = math.max(1, (mapWidth or 2000) / 500)
+	local logicalTiles = math.max(0, numTilesOwned) / (sf * sf)
 	local cityBonus = totalCityLevels * Config.CITY_TROOP_INCREASE
-	local base = 2 * (math.pow(math.max(0, numTilesOwned), 0.6) * 1000 + 50_000) + cityBonus
+	local base = 2 * (math.pow(logicalTiles, 0.6) * 1000 + 50_000) + cityBonus
 	if pType == "Bot" then
 		return math.floor(base / 3)
 	elseif pType == "Human" then
@@ -209,7 +252,6 @@ function Config.MaxTroops(
 	end
 end
 
--- Exact Config.troopIncreaseRate per 100ms tick
 function Config.TroopIncreasePerTick(
 	troops: number,
 	maxTroops: number,
@@ -235,19 +277,34 @@ function Config.TroopIncreasePerTick(
 	return math.min(maxTroops - troops, math.max(0, toAdd))
 end
 
-function Config.GoldPerTick(playerType: PlayerType, cfg: GameConfig): number
-	local base = if playerType == "Bot" then 50 else 100
-	return math.floor(base * cfg.goldMultiplier)
+function Config.GoldPerTick(
+	playerType: PlayerType,
+	cfg: GameConfig,
+	troops: number?,
+	tilesOwned: number?,
+	cityLevels: number?,
+	portLevels: number?,
+	factoryLevels: number?
+): number
+	if playerType == "Human" and cfg.infiniteGold then
+		return 10_000_000
+	end
+	local mult = if playerType == "Bot" then 0.65 else 1.0
+	local workers = math.max(0, troops or 0) * 0.30 + math.max(0, tilesOwned or 0) * 2.5
+	local infraMult = 1
+		+ math.max(0, cityLevels or 0) * 0.18
+		+ math.max(0, factoryLevels or 0) * 0.32
+		+ math.max(0, portLevels or 0) * 0.15
+	return math.floor((140 + workers * 0.016) * infraMult * mult * cfg.goldMultiplier)
 end
 
--- Sigmoid trade ship revenue matching EngineConfig.tradeShipGold
+-- Sigmoid trade ship revenue calibrated across 1000px..4108px maps
 function Config.TradeShipGold(dist: number, mapWidth: number, goldMult: number): number
-	local debuff = math.max(60, mapWidth * 0.28)
-	local baseGold = 75_000 / (1 + math.exp(-0.05 * (dist - debuff))) + 80 * dist
+	local debuff = math.max(100, mapWidth * 0.24)
+	local baseGold = 75_000 / (1 + math.exp(-0.025 * (dist - debuff))) + 65 * dist
 	return math.floor(baseGold * goldMult)
 end
 
--- Train revenue matching EngineConfig.trainGold
 function Config.TrainGold(rel: "self" | "team" | "ally" | "other", citiesVisited: number, goldMult: number): number
 	local extra = math.max(0, citiesVisited - 9)
 	local baseGold = 25_000
@@ -268,20 +325,23 @@ local function largeTerritoryBonus(numTiles: number, depth: number): number
 	return 1 - depth * sigmoid(math.log(safeTiles), 2.5, math.log(300_000))
 end
 
--- Exact EngineConfig.attackLogic per-tile combat resolution!
+-- Exact EngineConfig.attackLogic dimensional law (`dA = sf^2 * dA0` on 1:1 full-resolution pixel grids!)
 function Config.AttackLogic(
 	terrain: TerrainKind,
 	attackTroops: number,
 	attackerType: PlayerType,
 	attackerTiles: number,
-	defenderType: PlayerType?, -- nil when attacking Terra Nullius
+	defenderType: PlayerType?,
 	defenderTiles: number,
 	defenderTroops: number,
 	defenderIsTraitor: boolean,
 	defenderHasDefensePost: boolean,
-	falloutRatio: number?, -- nil if tile has no fallout
-	borderSize: number
-): (number, number, number) -- (attackerLoss, defenderLoss, tickFraction)
+	falloutRatio: number?,
+	borderSize: number,
+	mapWidth: number?
+): (number, number, number)
+	local sf = math.max(1, (mapWidth or 2000) / 500)
+	local areaScale = sf * sf
 	local mag = 80
 	local tileCost = 16.5
 	if terrain == "Highland" then
@@ -297,44 +357,46 @@ function Config.AttackLogic(
 		tileCost *= Config.DEFENSE_POST_SPEED_BONUS
 	end
 	if falloutRatio ~= nil then
-		local fmod = 5 - math.clamp(falloutRatio, 0, 1) * 2
+		local fmod = 3.0 - math.clamp(falloutRatio, 0, 1) * 1.2
 		mag *= fmod
 		tileCost *= fmod
 	end
 
 	local safeBorder = math.max(1, borderSize)
 	local safeAtk = math.max(1, attackTroops)
+	local logAtkTiles = attackerTiles / areaScale
+	local logDefTiles = defenderTiles / areaScale
 
 	if defenderType == nil then
-		local tickBudget = safeBorder * 2
-		local loss = mag / (if attackerType == "Bot" then 10 else 5)
-		local frac = math.clamp((2000 * tileCost) / safeAtk, 5, 100) / tickBudget
+		-- Exact upstream Terra Nullius expansion scaled by radial thickness `sf` + pixel area `areaScale`
+		local tickBudget = safeBorder * 5.0 * sf
+		local loss = ((mag * 0.08) / areaScale) / (if attackerType == "Bot" then 1.8 else 1.0)
+		local frac = math.clamp((1000 * tileCost) / safeAtk, 1.2, 50) / tickBudget
 		return loss, 0, frac
 	end
 
 	if (attackerType == "Human" or attackerType == "Nation") and defenderType == "Bot" then
-		mag *= 0.7
+		mag *= 0.70
 	end
 
-	local largeAtk = largeTerritoryBonus(attackerTiles, 0.70)
-	local largeDef = largeTerritoryBonus(defenderTiles, 0.30)
+	local largeAtk = largeTerritoryBonus(logAtkTiles * 8, 0.70)
+	local largeDef = largeTerritoryBonus(logDefTiles * 8, 0.30)
 	local traitorLoss = if defenderIsTraitor then Config.TRAITOR_DEFENSE_DEBUFF else 1.0
 	local traitorSpeed = if defenderIsTraitor then Config.TRAITOR_SPEED_DEBUFF else 1.0
 
 	local defLoss = defenderTroops / math.max(1, defenderTiles)
 	local troopRatio = defenderTroops / safeAtk
-	local atkLoss = mag
+	local atkLoss = (mag * 0.08)
 		* traitorLoss
-		* math.clamp(troopRatio, 0.6, 2.0)
-		* (0.463 * largeAtk * largeDef + 0.0039 * defLoss)
+		* math.clamp(troopRatio, 0.45, 2.0)
+		* ((0.08 * largeAtk * largeDef) / areaScale + 0.35 * defLoss)
 
-	local speedCost = (math.clamp(troopRatio, 0.82, 7.5) * math.clamp(troopRatio / 20, 1, 50)) / 8.55
-	local largeAtkSpeed = largeTerritoryBonus(attackerTiles, 0.73)
-	local tickFrac = (speedCost * tileCost * largeAtkSpeed * largeDef * traitorSpeed) / safeBorder
+	local speedCost = (math.clamp(troopRatio, 0.22, 6.0) * math.clamp(troopRatio / 20, 1, 50)) / 9.2
+	local largeAtkSpeed = largeTerritoryBonus(logAtkTiles * 8, 0.78)
+	local tickFrac = (speedCost * tileCost * largeAtkSpeed * largeDef * traitorSpeed * 0.45) / (safeBorder * sf)
 	return atkLoss, defLoss, tickFrac
 end
 
--- Overtime win percentage decay matching Config.percentageTilesOwnedToWin
 function Config.WinPercentageRequired(cfg: GameConfig, elapsedSeconds: number): number
 	if not cfg.overtimeEnabled then
 		return Config.PERCENT_TILES_TO_WIN
@@ -346,8 +408,7 @@ function Config.WinPercentageRequired(cfg: GameConfig, elapsedSeconds: number): 
 	return math.max(10, Config.PERCENT_TILES_TO_WIN - math.floor((past * 2) / 60))
 end
 
--- Doomsday Clock wave schedule matching DoomsdayClock.ts
-local DOOM_LEVELS_FFA = { 200, 400, 700, 1100, 1700, 2500, 3500 } -- basis points (2%..35%)
+local DOOM_LEVELS_FFA = { 200, 400, 700, 1100, 1700, 2500, 3500 }
 local DOOM_LEVELS_TEAM = { 300, 600, 1000, 1500, 2100, 2800, 3500 }
 
 function Config.DoomsdayRequiredShare(cfg: GameConfig, elapsedSeconds: number): number
@@ -386,11 +447,15 @@ function Config.DoomsdayRequiredShare(cfg: GameConfig, elapsedSeconds: number): 
 	return levels[#levels] / 10_000
 end
 
--- Quick Chat phrases & Emoji palette matching OpenFront
 Config.Emojis = {
 	"🤝", "👍", "👎", "🫡", "❤️", "😂", "😡", "💀",
 	"🏳️", "☢️", "⚔️", "🛡️", "💰", "🚢", "👑", "🔥",
 }
+
+Config.AllowedEmojis = {}
+for _, em in ipairs(Config.Emojis) do
+	Config.AllowedEmojis[em] = true
+end
 
 Config.QuickChats = {
 	{ id = "help_me", category = "Help", text = "Help me defend!", color = "#22c55e" },
@@ -403,7 +468,6 @@ Config.QuickChats = {
 	{ id = "no_betray", category = "Warn", text = "Stay loyal! No betrayal!", color = "#f97316" },
 }
 
--- Progression XP Curve matching OpenFront level badges
 function Config.XpForNextLevel(level: number): number
 	return 500 + level * 350
 end

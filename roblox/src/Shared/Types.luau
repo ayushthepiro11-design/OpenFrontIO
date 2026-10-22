@@ -1,5 +1,5 @@
 --!strict
--- Complete type definitions for OpenFront Roblox 1:1 Port
+-- Complete type definitions for OpenFront Roblox 1:1 Port (Full-Scale Edition)
 
 export type PlayerType = "Human" | "Nation" | "Bot"
 export type Difficulty = "Easy" | "Medium" | "Hard" | "Impossible"
@@ -29,7 +29,7 @@ export type TerrainKind = "Water" | "Plains" | "Highland" | "Mountain" | "Impass
 export type GameConfig = {
 	mapId: string,
 	mode: GameMode,
-	numTeams: number, -- 0 for FFA, 2/3/4 for Teams, -1 for Humans vs Nations
+	numTeams: number, -- 0 for FFA, 2/3/4/5/6/7 for Teams, -1 for Humans vs Nations
 	difficulty: Difficulty,
 	bots: number,
 	spawnNations: boolean,
@@ -49,6 +49,7 @@ export type GameConfig = {
 	overtimeEnabled: boolean,
 	overtimeStartMinutes: number,
 	singleplayer: boolean,
+	seed: number?,
 }
 
 export type PlayerProfileSave = {
@@ -89,13 +90,16 @@ export type UnitSummary = {
 	srcY: number,
 	dstX: number,
 	dstY: number,
+	patrolX: number?,
+	patrolY: number?,
 	level: number,
 	hp: number,
 	maxHp: number,
 	veterancy: number,
 	underConstruction: boolean,
 	constructionProgress: number,
-	cooldownProgress: number,
+	onCooldown: boolean?,
+	cooldownProgress: number?,
 	troops: number,
 	progress: number, -- 0..1 flight progress for parabolic projectiles
 }
@@ -122,17 +126,17 @@ export type PlayerSummary = {
 	troopRatePerSec: number,
 	attackingTroops: number,
 	gold: number,
-	goldEarned: number,
+	goldEarned: number?,
 	isTraitor: boolean,
-	traitorTicksLeft: number,
+	traitorTicksLeft: number?,
 	isDoomed: boolean,
 	allies: { number },
 	embargoes: { number },
 	emoji: string?,
-	emojiTicksLeft: number,
+	emojiTicksLeft: number?,
 	targetedBy: { number },
-	nukesSent: number,
-	unitsByType: { [string]: number },
+	nukesSent: number?,
+	unitCounts: { [string]: number }?,
 }
 
 export type ActionableAlert = {
@@ -154,6 +158,13 @@ export type EventFeedItem = {
 	targetX: number?,
 	targetY: number?,
 	tick: number,
+}
+
+export type FloatingPopup = {
+	x: number,
+	y: number,
+	text: string,
+	colorHex: string,
 }
 
 return {}

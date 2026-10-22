@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-Deterministic Zero-Dependency Compiler for OpenFront Roblox Place Files (.rbxl & .rbxlx).
+Deterministic LZ4-Compressed Compiler for OpenFront Roblox Place Files (.rbxl & .rbxlx).
 
 Strictly conforms to the official Roblox Binary Model Format specification (`rojo-rbx/rbx-dom` v1):
   - Header (32 bytes): b"<roblox!\\x89\\xff\\r\\n\\x1a\\n\\x00\\x00" + u32_le(num_classes) + u32_le(num_instances) + 8 zero bytes
-  - Chunk Header (16 bytes): 4-byte ASCII tag + u32_le(compressed_len=0) + u32_le(uncompressed_len) + u32_le(0)
-  - Big-endian byte-interleaved 32-bit integers + ZigZag encoding + delta-encoded Referents & Parent arrays
-  - Full round-trip binary & XML self-verification pass before exiting!
-
-Outputs:
-  1. /home/user/OpenFrontIO/OpenFront.rbxl        (Ready-to-open Studio binary place file at repo root!)
-  2. /home/user/OpenFrontIO/roblox/OpenFront.rbxl (Mirror copy inside roblox/)
-  3. /home/user/OpenFrontIO/roblox/OpenFront.rbxlx (XML Studio place file for human inspection/diffing)
+  - Chunk Header (16 bytes): 4-byte ASCII tag + u32_le(compressed_len) + u32_le(uncompressed_len) + u32_le(0)
+  - Raw LZ4 block compression (`lz4.block.compress(..., store_size=False)`) matching Studio & rbx_binary 1:1!
+  - Enforces < 160,000-character LuaSourceContainer.Source safety cap across every Script/ModuleScript.
+  - Full round-trip binary LZ4 & XML self-verification pass before exiting!
 """
 
 import os
@@ -19,6 +15,8 @@ import struct
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+import lz4.block
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ROBLOX_DIR = os.path.join(REPO_ROOT, "roblox")
@@ -28,7 +26,7 @@ OUT_ROOT_RBXL = os.path.join(REPO_ROOT, "OpenFront.rbxl")
 OUT_SUB_RBXL = os.path.join(ROBLOX_DIR, "OpenFront.rbxl")
 OUT_SUB_RBXLX = os.path.join(ROBLOX_DIR, "OpenFront.rbxlx")
 
-MAX_SOURCE_CHARS = 160_000  # Strict safety margin below Roblox Studio's 200,000-char Source limit!
+MAX_SOURCE_CHARS = 160_000
 
 MAGIC_HEADER = b"<roblox!\x89\xff\r\n\x1a\n\x00\x00"
 PROP_TYPE_STRING = 0x01
@@ -140,7 +138,6 @@ def build_datamodel() -> tuple[List[RbxInstance], int]:
         ]
     )
 
-    # Flatten DFS and assign deterministic 0..N-1 Referents
     all_instances: List[RbxInstance] = []
 
     def visit(node: RbxInstance):
@@ -155,9 +152,6 @@ def build_datamodel() -> tuple[List[RbxInstance], int]:
     return all_instances, (n_shared + n_server + n_client)
 
 
-# ==============================================================================
-# BINARY .RBXL ENCODER (rbx-dom exact wire specification)
-# ==============================================================================
 def pack_rbx_string(s: str) -> bytes:
     raw = s.encode("utf-8")
     return struct.pack("<I", len(raw)) + raw
@@ -214,9 +208,12 @@ def unpack_referent_array(buf: bytes, offset: int, count: int) -> tuple[List[int
     return refs, new_off
 
 
-def make_uncompressed_chunk(tag4: bytes, payload: bytes) -> bytes:
+def make_chunk(tag4: bytes, payload: bytes) -> bytes:
     assert len(tag4) == 4
-    # compressed_len = 0 instructs Roblox & rbx_binary to read `uncompressed_len` raw bytes directly!
+    if tag4 != b"END\x00" and len(payload) >= 64:
+        comp = lz4.block.compress(payload, mode="high_compression", compression=9, store_size=False)
+        if len(comp) < len(payload):
+            return tag4 + struct.pack("<III", len(comp), len(payload), 0) + comp
     return tag4 + struct.pack("<III", 0, len(payload), 0) + payload
 
 
@@ -237,11 +234,9 @@ def serialize_binary_rbxl(all_instances: List[RbxInstance]) -> bytes:
     chunks.extend(struct.pack("<II", num_classes, num_instances))
     chunks.extend(b"\x00" * 8)
 
-    # 1. META chunk
     meta_payload = struct.pack("<I", 1) + pack_rbx_string("ExplicitAutoJoints") + pack_rbx_string("true")
-    chunks.extend(make_uncompressed_chunk(b"META", meta_payload))
+    chunks.extend(make_chunk(b"META", meta_payload))
 
-    # 2. INST chunks (one per unique ClassName)
     for cid, cname in enumerate(class_order):
         group = by_class[cname]
         refs = [g.referent for g in group]
@@ -254,19 +249,17 @@ def serialize_binary_rbxl(all_instances: List[RbxInstance]) -> bytes:
         payload.extend(pack_referent_array(refs))
         if is_svc:
             payload.extend(b"\x01" * len(group))
-        chunks.extend(make_uncompressed_chunk(b"INST", bytes(payload)))
+        chunks.extend(make_chunk(b"INST", bytes(payload)))
 
-    # 3. PROP chunks (`Name` for every class; `Source` & `Disabled` for Script/LocalScript/ModuleScript)
     for cid, cname in enumerate(class_order):
         group = by_class[cname]
-        # Name property
         p_name = bytearray()
         p_name.extend(struct.pack("<I", cid))
         p_name.extend(pack_rbx_string("Name"))
         p_name.append(PROP_TYPE_STRING)
         for g in group:
             p_name.extend(pack_rbx_string(g.name))
-        chunks.extend(make_uncompressed_chunk(b"PROP", bytes(p_name)))
+        chunks.extend(make_chunk(b"PROP", bytes(p_name)))
 
         if cname in ("Script", "LocalScript", "ModuleScript"):
             p_src = bytearray()
@@ -275,7 +268,7 @@ def serialize_binary_rbxl(all_instances: List[RbxInstance]) -> bytes:
             p_src.append(PROP_TYPE_STRING)
             for g in group:
                 p_src.extend(pack_rbx_string(g.source or ""))
-            chunks.extend(make_uncompressed_chunk(b"PROP", bytes(p_src)))
+            chunks.extend(make_chunk(b"PROP", bytes(p_src)))
 
         if cname in ("Script", "LocalScript"):
             p_dis = bytearray()
@@ -283,20 +276,18 @@ def serialize_binary_rbxl(all_instances: List[RbxInstance]) -> bytes:
             p_dis.extend(pack_rbx_string("Disabled"))
             p_dis.append(PROP_TYPE_BOOL)
             p_dis.extend(b"\x00" * len(group))
-            chunks.extend(make_uncompressed_chunk(b"PROP", bytes(p_dis)))
+            chunks.extend(make_chunk(b"PROP", bytes(p_dis)))
 
-    # 4. PRNT chunk (child -> parent Referent links; -1 = root under DataModel)
     prnt = bytearray()
-    prnt.append(0)  # format version 0
+    prnt.append(0)
     prnt.extend(struct.pack("<I", num_instances))
     child_refs = [inst.referent for inst in all_instances]
     parent_refs = [inst.parent.referent if inst.parent is not None else -1 for inst in all_instances]
     prnt.extend(pack_referent_array(child_refs))
     prnt.extend(pack_referent_array(parent_refs))
-    chunks.extend(make_uncompressed_chunk(b"PRNT", bytes(prnt)))
+    chunks.extend(make_chunk(b"PRNT", bytes(prnt)))
 
-    # 5. END chunk (`</roblox>`)
-    chunks.extend(make_uncompressed_chunk(b"END\x00", b"</roblox>"))
+    chunks.extend(make_chunk(b"END\x00", b"</roblox>"))
     return bytes(chunks)
 
 
@@ -315,11 +306,17 @@ def verify_binary_rbxl(blob: bytes, expected_instances: List[RbxInstance]) -> No
     while pos < len(blob):
         tag = blob[pos : pos + 4]
         comp_len, uncomp_len, reserved = struct.unpack("<III", blob[pos + 4 : pos + 16])
-        assert comp_len == 0 and reserved == 0
+        assert reserved == 0
         pos += 16
-        body = blob[pos : pos + uncomp_len]
+        if comp_len > 0:
+            raw_comp = blob[pos : pos + comp_len]
+            assert len(raw_comp) == comp_len
+            body = lz4.block.decompress(raw_comp, uncompressed_size=uncomp_len)
+            pos += comp_len
+        else:
+            body = blob[pos : pos + uncomp_len]
+            pos += uncomp_len
         assert len(body) == uncomp_len
-        pos += uncomp_len
 
         if tag == b"INST":
             cid = struct.unpack("<I", body[0:4])[0]
@@ -369,9 +366,6 @@ def verify_binary_rbxl(blob: bytes, expected_instances: List[RbxInstance]) -> No
             assert parsed_sources[exp.referent] == exp.source, f"Source mismatch on {exp.name}!"
 
 
-# ==============================================================================
-# XML .RBXLX SERIALIZER & SELF-VERIFIER
-# ==============================================================================
 def serialize_xml_rbxlx(all_instances: List[RbxInstance]) -> bytes:
     root_el = ET.Element(
         "roblox",
@@ -408,7 +402,6 @@ def serialize_xml_rbxlx(all_instances: List[RbxInstance]) -> bytes:
             emit(inst, root_el)
 
     xml_bytes = b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root_el, encoding="utf-8")
-    # Parse back via standard XML parser to guarantee well-formedness & 1:1 Source fidelity
     parsed_root = ET.fromstring(xml_bytes)
     assert len(list(parsed_root.iter("Item"))) == len(all_instances)
     return xml_bytes
@@ -428,7 +421,7 @@ def main():
 
     print(
         f"[build_rbxl] SUCCESS: {total_scripts} Luau scripts ({len(all_instances)} DataModel instances) -> "
-        f"OpenFront.rbxl ({len(bin_bytes) / 1024:.1f} KB binary verified) & "
+        f"OpenFront.rbxl ({len(bin_bytes) / 1024:.1f} KB LZ4-compressed binary verified) & "
         f"roblox/OpenFront.rbxlx ({len(xml_bytes) / 1024:.1f} KB XML verified)"
     )
 

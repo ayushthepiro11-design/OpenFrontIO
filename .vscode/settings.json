@@ -1,5 +1,0 @@
-{
-  "html.validate.scripts": false,
-  "tailwindCSS.lint.suggestCanonicalClasses": "ignore",
-  "lit-plugin.rules.suggestCanonicalClasses": "off"
-}

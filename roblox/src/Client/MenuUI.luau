@@ -411,7 +411,7 @@ function MenuUI:_BuildHostModal(parent: Frame): Frame
 	header.TextXAlignment = Enum.TextXAlignment.Left
 	header.TextSize = 20
 	header.TextColor3 = Color3.new(1, 1, 1)
-	header.Text = "🛠️ HOST CUSTOM OPENFRONT MATCH"
+	header.Text = "🛠️ HOST FULL-SCALE MATCH (24 1:1 MAPS)"
 	header.ZIndex = 46
 	header.Parent = modal
 
@@ -481,14 +481,16 @@ function MenuUI:_BuildHostModal(parent: Frame): Frame
 		UiWidgets.PopulateMapPreview(prev, mapDef)
 
 		local lbl = Instance.new("TextLabel")
-		lbl.Position = UDim2.fromOffset(8, 101)
-		lbl.Size = UDim2.fromOffset(178, 22)
+		lbl.Position = UDim2.fromOffset(6, 100)
+		lbl.Size = UDim2.fromOffset(182, 24)
 		lbl.BackgroundTransparency = 1
 		lbl.Font = Enum.Font.GothamBold
-		lbl.TextSize = 12
+		lbl.TextSize = 10
+		lbl.TextTruncate = Enum.TextTruncate.AtEnd
+		lbl.TextWrapped = false
 		lbl.TextColor3 = Color3.new(1, 1, 1)
 		lbl.TextXAlignment = Enum.TextXAlignment.Left
-		lbl.Text = string.format("%s (%d Nations)", mapDef.name, #mapDef.nations)
+		lbl.Text = string.format("%s · %dx%d (%d)", mapDef.name, mapDef.width, mapDef.height, #mapDef.nations)
 		lbl.ZIndex = 48
 		lbl.Parent = card
 

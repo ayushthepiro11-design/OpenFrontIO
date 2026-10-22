@@ -91,8 +91,10 @@ local SERVICES = {}
 local Instance
 local function Instance_new(className, parent)
 	local children = {}
+	local childByName = {}
 	local props = {
-		ClassName = className, Name = className, Parent = nil, Visible = true,
+		ClassName = className, Name = className, Parent = nil, Visible = true, Active = true,
+		BackgroundTransparency = 0, TextTransparency = 0,
 		Size = UDim2.fromOffset(100, 100), Position = UDim2.fromOffset(0, 0),
 		AbsoluteSize = Vector2.new(1280, 720), AbsolutePosition = Vector2.new(0, 0),
 		BackgroundColor3 = Color3.new(0, 0, 0), TextColor3 = Color3.new(1, 1, 1), Text = "",
@@ -103,8 +105,7 @@ local function Instance_new(className, parent)
 		__index = function(_t, k)
 			local v = rawget(props, k)
 			if v ~= nil then return v end
-			for _, ch in ipairs(children) do if ch.Name == k then return ch end end
-			return nil
+			return childByName[k]
 		end,
 		__newindex = function(_t, k, v)
 			if k == "Parent" then
@@ -112,12 +113,24 @@ local function Instance_new(className, parent)
 				if oldP ~= nil then oldP:_RemoveChild(inst) end
 				rawset(props, "Parent", v)
 				if v ~= nil then v:_AddChild(inst) end
+			elseif k == "Name" then
+				local oldN = rawget(props, "Name")
+				rawset(props, "Name", v)
+				local p = rawget(props, "Parent")
+				if p ~= nil then p:_Reindex(oldN, v, inst) end
 			else rawset(props, k, v) end
 		end,
 	})
-	function props:_AddChild(ch) table.insert(children, ch) end
-	function props:_RemoveChild(ch) for i, c in ipairs(children) do if c == ch then table.remove(children, i) break end end end
-	function props:FindFirstChild(name) for _, ch in ipairs(children) do if ch.Name == name then return ch end end return nil end
+	function props:_Reindex(o, n, ch)
+		if o ~= nil and childByName[o] == ch then childByName[o] = nil end
+		if n ~= nil then childByName[n] = ch end
+	end
+	function props:_AddChild(ch) table.insert(children, ch); childByName[ch.Name] = ch end
+	function props:_RemoveChild(ch)
+		if childByName[ch.Name] == ch then childByName[ch.Name] = nil end
+		for i, c in ipairs(children) do if c == ch then table.remove(children, i) break end end
+	end
+	function props:FindFirstChild(name) return childByName[name] end
 	function props:WaitForChild(name) return assert(props:FindFirstChild(name)) end
 	function props:GetChildren() return table.clone(children) end
 	function props:ClearAllChildren() for i = #children, 1, -1 do children[i].Parent = nil end end
@@ -133,14 +146,12 @@ SERVICES.ReplicatedStorage = Instance.new("ReplicatedStorage")
 SERVICES.ServerScriptService = Instance.new("ServerScriptService")
 SERVICES.SoundService = Instance.new("SoundService")
 SERVICES.StarterGui = Instance.new("StarterGui")
-local LATEST_PIXEL_BUF = nil
 SERVICES.AssetService = {
 	CreateEditableImage = function(_self, spec)
 		return {
 			Size = spec.Size,
-			WritePixelsBuffer = function(_img, _pos, _sz, buf)
-				LATEST_PIXEL_BUF = buf
-			end,
+			WritePixelsBuffer = function(_img, _pos, _sz, _buf) end,
+			Destroy = function() end,
 		}
 	end,
 }
@@ -388,7 +399,7 @@ return function(cmd, arg1, arg2, arg3)
 		for _, u in ipairs(pl.units or {}) do
 			table.insert(units, { id = u.id, t = u.unitType, o = u.ownerSmallId, x = u.x, y = u.y, dx = u.dstX, dy = u.dstY })
 		end
-		return base64EncodeBuffer(LATEST_PIXEL_BUF) .. "\\n" .. toJson({
+		return base64EncodeBuffer(canvas.pixelBuf) .. "\\n" .. toJson({
 			mapId = pl.mapId, mapW = canvas.map.width, mapH = canvas.map.height,
 			numLand = canvas.map.numLandTiles, inSpawn = pl.inSpawnPhase,
 			spawnLeft = pl.spawnSecondsLeft, elapsed = pl.elapsedSeconds,
@@ -487,28 +498,29 @@ const HTML_PAGE = `<!doctype html>
 </head>
 <body>
 <header>
-  <div class="brand">OPENFRONT FOR ROBLOX — LIVE LUAU WASM ENGINE & GAMEPLAY MEDIA</div>
+  <div class="brand">OPENFRONT ROBLOX EDITION — PURE ROBLOX BRANCH • 24 1:1 MAPS • 1.0x FULL BOT MATCH</div>
   <div class="tabs">
-    <button id="tabMedia" class="active" onclick="switchTab('media')">Watch Gameplay Video & 8 Screenshots</button>
+    <button id="tabMedia" class="active" onclick="switchTab('media')">Uncut 1.0x Full Match Video & 8 Screenshots</button>
     <button id="tabPlay" class="green" onclick="switchTab('play')">Play Live Luau Engine Interactive!</button>
+    <a href="download/OpenFront.rbxl" style="text-decoration:none;"><button class="gold">Download OpenFront.rbxl (Studio)</button></a>
   </div>
 </header>
 
 <section id="showcaseView">
   <div class="heroVideoCard">
-    <h2>Recorded Live Gameplay Video (1280x720 HD • Real Luau Simulation + Stereo Sound FX)</h2>
+    <h2>Complete Uncut 1.0x Normal-Speed Bot Match — 2m 36.0s Start-to-Finish (India Spawn -> Earned 25M MIRV -> 80.2% World Conquest, Zero Cuts, 1280x720 HD)</h2>
     <video controls autoplay muted loop playsinline src="media/OpenFront_Roblox_Gameplay.mp4?v=${Date.now()}"></video>
   </div>
-  <h2>8 High-Resolution Live Gameplay Screenshots (Click any image to view full size)</h2>
+  <h2>8 Full-HD Live Gameplay Screenshots (1280x720 — Click any image to view full resolution)</h2>
   <div class="grid">
-    <div class="shotCard"><a href="media/01_main_menu_live_preview.png?v=${Date.now()}" target="_blank"><img src="media/01_main_menu_live_preview.png?v=${Date.now()}"/></a><p>1. Main Menu over Live AI World Battle</p></div>
-    <div class="shotCard"><a href="media/02_host_lobby_10_maps.png?v=${Date.now()}" target="_blank"><img src="media/02_host_lobby_10_maps.png?v=${Date.now()}"/></a><p>2. Host Custom Match — All 10 Real Maps</p></div>
-    <div class="shotCard"><a href="media/03_spawn_phase_india.png?v=${Date.now()}" target="_blank"><img src="media/03_spawn_phase_india.png?v=${Date.now()}"/></a><p>3. Spawn Selection in Northern India</p></div>
-    <div class="shotCard"><a href="media/04_empire_expansion_and_radial_menu.png?v=${Date.now()}" target="_blank"><img src="media/04_empire_expansion_and_radial_menu.png?v=${Date.now()}"/></a><p>4. Border Expansion & Circular Radial Menu</p></div>
-    <div class="shotCard"><a href="media/05_build_menu_economy_trains_ships.png?v=${Date.now()}" target="_blank"><img src="media/05_build_menu_economy_trains_ships.png?v=${Date.now()}"/></a><p>5. Build Menu, Cities, Ports, Trade Ships & Warships</p></div>
-    <div class="shotCard"><a href="media/06_mirv_and_nuclear_warfare.png?v=${Date.now()}" target="_blank"><img src="media/06_mirv_and_nuclear_warfare.png?v=${Date.now()}"/></a><p>6. 30-Warhead MIRV Salvo, Shockwaves & Fallout</p></div>
-    <div class="shotCard"><a href="media/07_shinobi_world_ninja_war.png?v=${Date.now()}" target="_blank"><img src="media/07_shinobi_world_ninja_war.png?v=${Date.now()}"/></a><p>7. Custom Shinobi World Ninja Villages Map</p></div>
-    <div class="shotCard"><a href="media/08_victory_ceremony_xp_levelup.png?v=${Date.now()}" target="_blank"><img src="media/08_victory_ceremony_xp_levelup.png?v=${Date.now()}"/></a><p>8. Global Conquest & Level-Up XP Ceremony</p></div>
+    <div class="shotCard"><a href="media/01_main_menu_live_preview.png?v=${Date.now()}" target="_blank"><img src="media/01_main_menu_live_preview.png?v=${Date.now()}"/></a><p>1. Main Menu over Live 2000x1000 World Preview</p></div>
+    <div class="shotCard"><a href="media/02_host_lobby_10_maps.png?v=${Date.now()}" target="_blank"><img src="media/02_host_lobby_10_maps.png?v=${Date.now()}"/></a><p>2. Host Full-Scale Match — All 24 Real 1:1 Maps</p></div>
+    <div class="shotCard"><a href="media/03_spawn_phase_india.png?v=${Date.now()}" target="_blank"><img src="media/03_spawn_phase_india.png?v=${Date.now()}"/></a><p>3. 1.0x Spawn Selection in India (Himalayan Frontier)</p></div>
+    <div class="shotCard"><a href="media/04_empire_expansion_and_radial_menu.png?v=${Date.now()}" target="_blank"><img src="media/04_empire_expansion_and_radial_menu.png?v=${Date.now()}"/></a><p>4. Organic Terrain-Contoured Expansion & Radial Menu</p></div>
+    <div class="shotCard"><a href="media/05_build_menu_economy_trains_ships.png?v=${Date.now()}" target="_blank"><img src="media/05_build_menu_economy_trains_ships.png?v=${Date.now()}"/></a><p>5. Build Menu — Cities, Ports, Factories, Fleets & MIRV</p></div>
+    <div class="shotCard"><a href="media/06_mirv_and_nuclear_warfare.png?v=${Date.now()}" target="_blank"><img src="media/06_mirv_and_nuclear_warfare.png?v=${Date.now()}"/></a><p>6. Earned 25.0M Orbital MIRV Multi-Warhead Salvo Live!</p></div>
+    <div class="shotCard"><a href="media/07_shinobi_world_ninja_war.png?v=${Date.now()}" target="_blank"><img src="media/07_shinobi_world_ninja_war.png?v=${Date.now()}"/></a><p>7. Tactical Alt-View (Self Green / Enemy Red) & Sea Trade</p></div>
+    <div class="shotCard"><a href="media/08_victory_ceremony_xp_levelup.png?v=${Date.now()}" target="_blank"><img src="media/08_victory_ceremony_xp_levelup.png?v=${Date.now()}"/></a><p>8. Natural 80.2% World Conquest at 1.0x Speed (+4,850 XP)</p></div>
   </div>
 </section>
 
@@ -519,13 +531,30 @@ const HTML_PAGE = `<!doctype html>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
       <strong id="clockTxt">World • 00:00</strong>
       <select id="mapSelect" onchange="startMap(this.value)">
-        <option value="World">World Map</option>
-        <option value="ShinobiWorld">Shinobi World</option>
-        <option value="Europe">Europe</option>
-        <option value="Asia">Asia</option>
-        <option value="NorthAmerica">North America</option>
-        <option value="Africa">Africa</option>
-        <option value="Britannia">Britannia</option>
+        <option value="World">World (2000x1000)</option>
+        <option value="GiantWorldMap">Giant World (4108x1948)</option>
+        <option value="ShinobiWorld">Shinobi World (1500x1500)</option>
+        <option value="Europe">Europe (2904x1672)</option>
+        <option value="NorthAmerica">North America (2800x1448)</option>
+        <option value="IndianSubcontinent">India Subcont. (2000x2220)</option>
+        <option value="Asia">Asia (2000x1200)</option>
+        <option value="Africa">Africa (1948x2032)</option>
+        <option value="SouthAmerica">South America (1744x2376)</option>
+        <option value="UnitedStates">United States (2800x1548)</option>
+        <option value="Russia">Russia (3200x1688)</option>
+        <option value="China">China (2248x2024)</option>
+        <option value="Japan">Japan (2500x2500)</option>
+        <option value="Britannia">Britannia (1600x2088)</option>
+        <option value="France">France (2424x2424)</option>
+        <option value="Germany">Germany (1548x1516)</option>
+        <option value="Italia">Italia (1360x1272)</option>
+        <option value="MareNostrum">Mare Nostrum (2848x1448)</option>
+        <option value="BlackSea">Black Sea (1500x1100)</option>
+        <option value="StraitOfGibraltar">Gibraltar (2900x1476)</option>
+        <option value="Caribbean">Caribbean (3200x1808)</option>
+        <option value="Australia">Australia (2000x1500)</option>
+        <option value="Mars">Mars (2000x1000)</option>
+        <option value="Pangaea">Pangaea (1000x1000)</option>
       </select>
     </div>
     <div id="lbList"></div>
@@ -554,8 +583,8 @@ const HTML_PAGE = `<!doctype html>
 <script>
 let activeTab = 'media';
 let clickMode = 'Attack';
-let camX = 250, camY = 125, scale = 2.4;
-let mapW = 500, mapH = 250;
+let camX = 1000, camY = 500, scale = 0.65;
+let mapW = 2000, mapH = 1000;
 let stateMeta = null;
 const offCanvas = document.createElement('canvas');
 const offCtx = offCanvas.getContext('2d');
@@ -591,7 +620,7 @@ async function startMap(mapId, sandbox = false) {
 function resizeCanvas() {
   cv.width = cv.clientWidth || 1280;
   cv.height = cv.clientHeight || 660;
-  scale = Math.max(1.5, Math.min(cv.width / mapW, cv.height / mapH) * 0.92);
+  scale = Math.max(0.28, Math.min(cv.width / mapW, cv.height / mapH) * 0.96);
 }
 window.addEventListener('resize', resizeCanvas);
 
@@ -637,7 +666,7 @@ cv.addEventListener('wheel', e => {
   e.preventDefault();
   const wx = camX + (e.offsetX - cv.width * 0.5) / scale;
   const wy = camY + (e.offsetY - cv.height * 0.5) / scale;
-  scale = Math.max(1.1, Math.min(22, scale * (e.deltaY < 0 ? 1.2 : 0.83)));
+  scale = Math.max(0.28, Math.min(22, scale * (e.deltaY < 0 ? 1.2 : 0.83)));
   camX = wx - (e.offsetX - cv.width * 0.5) / scale;
   camY = wy - (e.offsetY - cv.height * 0.5) / scale;
 }, { passive: false });
@@ -781,6 +810,24 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (pathname === "/download/OpenFront.rbxl") {
+    const rbxlFile = path.join(REPO_ROOT, "OpenFront.rbxl");
+    if (fs.existsSync(rbxlFile)) {
+      const stat = fs.statSync(rbxlFile);
+      res.writeHead(200, {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": stat.size,
+        "Content-Disposition": 'attachment; filename="OpenFront.rbxl"',
+      });
+      if (req.method === "HEAD") {
+        res.end();
+        return;
+      }
+      fs.createReadStream(rbxlFile).pipe(res);
+      return;
+    }
+  }
+
   if (pathname.startsWith("/media/")) {
     const safeName = path.basename(pathname.slice("/media/".length));
     const filePath = path.join(GAMEPLAY_DIR, safeName);
@@ -814,6 +861,10 @@ const server = http.createServer(async (req, res) => {
       "Content-Length": stat.size,
       "Cache-Control": "no-store",
     });
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
     fs.createReadStream(filePath).pipe(res);
     return;
   }

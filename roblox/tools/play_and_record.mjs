@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 /**
- * Plays a full multi-act OpenFront Roblox session LIVE inside real Luau WebAssembly (`luau-web`)
- * using our exact unmodified `roblox/src/` Luau engine & pixel shader (`MapCanvas.luau`),
- * recording exact RGBA8 `EditableImage` buffers + world/HUD telemetry for 1280x720 HD video & screenshots!
+ * Plays AND records a 100% COMPLETE, UNCUT, START-TO-FINISH singleplayer match against
+ * 24 autonomous AI Bots at TRUE 1.0x NORMAL GAME SPEED (`10 ticks = 1.000 second`, ZERO skipped
+ * ticks, ZERO `ConquerTile` hacks, `startingGold = 0`, `infiniteGold = false`,
+ * `infiniteTroops = false`, `instantBuild = false`) inside real Luau WebAssembly (`luau-web`)
+ * on the full-resolution `2000x1000` `World` map — from Main Menu -> Lobby -> 10s Spawn Countdown ->
+ * Early Heartland Expansion -> Economy (Cities, Ports, Trade Ships, Factories, Rail Trains, Warships) ->
+ * Trans-Oceanic Amphibious Fleet Invasions -> Atom Bombs, Hydrogen Bombs & Earned 25M MIRV Strike ->
+ * Natural `>= 80%` Global Land Victory (`SimEngine:Step()` sets `sim.gameOver = true`) -> Victory XP Ceremony!
  */
 
 import fs from "node:fs";
@@ -40,72 +45,55 @@ const moduleClosures = Object.entries(files)
   )
   .join("\n\n");
 
-// Callback from Luau -> Node to write each captured frame's RGBA map buffer & JSON telemetry directly to disk!
-let frameIdx = 0;
-let lastMapKey = "";
-const metaStream = fs.createWriteStream(path.join(OUT_RAW_DIR, "frames.jsonl"));
-
-function emitFrame(rgbaB64Str, metaJsonStr) {
-  const idx = frameIdx++;
-  const rawBuf = Buffer.from(rgbaB64Str, "base64");
-  const rgbaPath = path.join(
-    OUT_RAW_DIR,
-    `rgba_${String(idx).padStart(4, "0")}.bin`,
+function emitTerrain(nameStr, b64Terrain) {
+  const buf = Buffer.from(b64Terrain, "base64");
+  fs.writeFileSync(path.join(OUT_RAW_DIR, `terrain_${nameStr}.bin`), buf);
+  console.log(
+    `[luau-recorder] Exported full 1:1 terrain buffer terrain_${nameStr}.bin (${buf.length.toLocaleString()} bytes)`,
   );
-  fs.writeFileSync(rgbaPath, rawBuf);
+}
+
+let tickFrameIdx = 0;
+const metaStream = fs.createWriteStream(path.join(OUT_RAW_DIR, "ticks.jsonl"));
+const deltaFd = fs.openSync(path.join(OUT_RAW_DIR, "deltas.bin"), "w");
+
+function emitTick(ownerDeltaB64, falloutDeltaB64, metaJsonStr) {
+  const idx = tickFrameIdx++;
+  const ownerBuf = ownerDeltaB64
+    ? Buffer.from(ownerDeltaB64, "base64")
+    : Buffer.alloc(0);
+  const fallBuf = falloutDeltaB64
+    ? Buffer.from(falloutDeltaB64, "base64")
+    : Buffer.alloc(0);
+
+  const hdr = Buffer.alloc(8);
+  hdr.writeUInt32LE(ownerBuf.length, 0);
+  hdr.writeUInt32LE(fallBuf.length, 4);
+  fs.writeSync(deltaFd, hdr);
+  if (ownerBuf.length > 0) fs.writeSync(deltaFd, ownerBuf);
+  if (fallBuf.length > 0) fs.writeSync(deltaFd, fallBuf);
+
   metaStream.write(metaJsonStr + "\n");
-  if (idx % 60 === 0) {
-    const parsed = JSON.parse(metaJsonStr);
-    if (parsed.phase !== lastMapKey) {
-      lastMapKey = parsed.phase;
-    }
+  if (idx % 150 === 0) {
+    const m = JSON.parse(metaJsonStr);
+    const pct = m.me ? ((m.me.tiles / Math.max(1, m.numLand)) * 100).toFixed(1) : "0.0";
     console.log(
-      `[luau-recorder] Captured frame ${idx} (${parsed.phase} on ${parsed.mapId}, tick=${parsed.ticks})`,
+      `[luau-recorder] TickFrame ${idx} (${(idx * 0.1).toFixed(1)}s @ 1.0x) | ${m.phase} | simTick=${m.ticks} | land=${pct}%`,
     );
   }
 }
 
 const RECORD_SCRIPT = `
-local EMIT_FRAME = ...
+local EMIT_TERRAIN, EMIT_TICK = ...
 local MODULES = {}
 local MODULE_CACHE = {}
-
-local function makeSignal()
-	local listeners = {}
-	local sig = {}
-	function sig:Connect(fn)
-		table.insert(listeners, fn)
-		return { Disconnect = function() end }
-	end
-	function sig:Fire(...)
-		for _, fn in ipairs(table.clone(listeners)) do
-			fn(...)
-		end
-	end
-	return sig
-end
 
 local Color3 = {}
 Color3.__index = Color3
 function Color3.new(r, g, b) return setmetatable({ R = r or 0, G = g or 0, B = b or 0 }, Color3) end
 function Color3.fromRGB(r, g, b) return Color3.new((r or 0) / 255, (g or 0) / 255, (b or 0) / 255) end
 function Color3.fromHSV(h, s, v) return Color3.new(h, s, v) end
-
-local Vector2 = {}
-Vector2.__index = Vector2
-function Vector2.new(x, y)
-	local mx, my = x or 0, y or 0
-	return setmetatable({ X = mx, Y = my, Magnitude = math.sqrt(mx * mx + my * my) }, Vector2)
-end
-function Vector2.__sub(a, b) return Vector2.new(a.X - b.X, a.Y - b.Y) end
-function Vector2.__add(a, b) return Vector2.new(a.X + b.X, a.Y + b.Y) end
-function Vector2.__mul(a, s)
-	if type(s) == "number" then return Vector2.new(a.X * s, a.Y * s) end
-	return Vector2.new(a.X * s.X, a.Y * s.Y)
-end
-Vector2.zero = Vector2.new(0, 0)
-Vector2.one = Vector2.new(1, 1)
-
+local Vector2 = { new = function(x, y) return { X = x or 0, Y = y or 0 } end, zero = { X = 0, Y = 0 }, one = { X = 1, Y = 1 } }
 local Vector3 = { new = function(x, y, z) return { X = x or 0, Y = y or 0, Z = z or 0 } end, zero = { X = 0, Y = 0, Z = 0 } }
 local UDim = { new = function(s, o) return { Scale = s or 0, Offset = o or 0 } end }
 local UDim2 = {
@@ -113,178 +101,83 @@ local UDim2 = {
 	fromScale = function(sx, sy) return { X = UDim.new(sx, 0), Y = UDim.new(sy, 0) } end,
 	fromOffset = function(ox, oy) return { X = UDim.new(0, ox), Y = UDim.new(0, oy) } end,
 }
-local Content = { fromObject = function(obj) return { _object = obj } end }
 local Enum = setmetatable({}, {
 	__index = function(self, g)
-		local grp = setmetatable({}, {
-			__index = function(gg, k)
-				local it = { Name = k, EnumType = g, Value = #k }
-				rawset(gg, k, it)
-				return it
-			end,
-		})
+		local grp = setmetatable({}, { __index = function(gg, k) local it = { Name = k }; rawset(gg, k, it); return it end })
 		rawset(self, g, grp)
 		return grp
 	end,
 })
-local task = { spawn = function(fn, ...) fn(...) end, defer = function(fn, ...) fn(...) end, delay = function() end, wait = function(t) return t or 0.016 end }
 
-local SERVICES = {}
-local Instance
-local function Instance_new(className, parent)
-	local children = {}
-	local props = {
-		ClassName = className, Name = className, Parent = nil, Visible = true,
-		Size = UDim2.fromOffset(100, 100), Position = UDim2.fromOffset(0, 0),
-		AbsoluteSize = Vector2.new(1280, 720), AbsolutePosition = Vector2.new(0, 0),
-		BackgroundColor3 = Color3.new(0, 0, 0), TextColor3 = Color3.new(1, 1, 1), Text = "",
-		Activated = makeSignal(), InputBegan = makeSignal(), InputChanged = makeSignal(), InputEnded = makeSignal(),
-	}
-	local inst = {}
-	setmetatable(inst, {
-		__index = function(_t, k)
-			local v = rawget(props, k)
-			if v ~= nil then return v end
-			for _, ch in ipairs(children) do if ch.Name == k then return ch end end
-			return nil
-		end,
-		__newindex = function(_t, k, v)
-			if k == "Parent" then
-				local oldP = rawget(props, "Parent")
-				if oldP ~= nil then oldP:_RemoveChild(inst) end
-				rawset(props, "Parent", v)
-				if v ~= nil then v:_AddChild(inst) end
-			else
-				rawset(props, k, v)
-			end
-		end,
-	})
-	function props:_AddChild(ch) table.insert(children, ch) end
-	function props:_RemoveChild(ch) for i, c in ipairs(children) do if c == ch then table.remove(children, i) break end end end
-	function props:FindFirstChild(name) for _, ch in ipairs(children) do if ch.Name == name then return ch end end return nil end
-	function props:WaitForChild(name) return assert(props:FindFirstChild(name), "Missing child " .. tostring(name)) end
-	function props:GetChildren() return table.clone(children) end
-	function props:ClearAllChildren() for i = #children, 1, -1 do children[i].Parent = nil end end
-	function props:Destroy() props:ClearAllChildren(); inst.Parent = nil end
-	function props:IsA(tc) return props.ClassName == tc end
-	if parent ~= nil then inst.Parent = parent end
-	return inst
-end
-Instance = { new = Instance_new }
+local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local B64_ARR = table.create(64)
+for i = 1, 64 do B64_ARR[i] = string.byte(B64, i) end
 
-SERVICES.Workspace = Instance.new("Workspace")
-SERVICES.ReplicatedStorage = Instance.new("ReplicatedStorage")
-SERVICES.ServerScriptService = Instance.new("ServerScriptService")
-SERVICES.SoundService = Instance.new("SoundService")
-SERVICES.StarterGui = Instance.new("StarterGui")
-SERVICES.AssetService = {
-	CreateEditableImage = function(_self, spec)
-		return {
-			Size = spec.Size,
-			LastBuf = nil,
-			WritePixelsBuffer = function(img, _pos, _sz, buf)
-				img.LastBuf = buf
-			end,
-		}
-	end,
-}
-
-local game = { GetService = function(_s, nm) return assert(SERVICES[nm], "Missing service " .. nm) end, BindToClose = function() end }
-local workspace = SERVICES.Workspace
-
-local function executeLuauInstance(inst)
-	return assert(MODULES[inst._relPath])(inst)
-end
-local function require(modInst)
-	if MODULE_CACHE[modInst] == nil then
-		MODULE_CACHE[modInst] = executeLuauInstance(modInst)
-	end
-	return MODULE_CACHE[modInst]
-end
-
-${moduleClosures}
-
-local sharedFolder = Instance.new("Folder", SERVICES.ReplicatedStorage); sharedFolder.Name = "OpenFrontShared"
-local mapsFolder = Instance.new("Folder", sharedFolder); mapsFolder.Name = "Maps"
-local serverFolder = Instance.new("Folder", SERVICES.ServerScriptService); serverFolder.Name = "OpenFrontServer"
-local clientFolder = Instance.new("Folder"); clientFolder.Name = "OpenFrontClient"
-
-for relPath, _ in pairs(MODULES) do
-	local parts = string.split(relPath, "/")
-	local parentInst = if parts[1] == "Shared" then sharedFolder elseif parts[1] == "Server" then serverFolder else clientFolder
-	for i = 2, #parts - 1 do
-		local sub = parentInst:FindFirstChild(parts[i]) or Instance.new("Folder", parentInst)
-		sub.Name = parts[i]
-		parentInst = sub
-	end
-	local leaf = parts[#parts]
-	local inst = Instance.new("ModuleScript", parentInst)
-	inst.Name = leaf:gsub("%.server%.luau$", ""):gsub("%.client%.luau$", ""):gsub("%.luau$", "")
-	inst._relPath = relPath
-end
-
-local Config = require(sharedFolder.Config)
-local MapCodec = require(sharedFolder.MapCodec)
-local MapRegistry = require(mapsFolder.MapRegistry)
-local NetCodec = require(sharedFolder.NetCodec)
-local SimEngine = require(serverFolder.SimEngine)
-local Camera2D = require(clientFolder.Camera2D)
-local MapCanvas = require(clientFolder.MapCanvas)
-
-local B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-local B64_ARR = {}
-for i = 1, 64 do B64_ARR[i - 1] = string.sub(B64_CHARS, i, i) end
-
-local function base64EncodeBuffer(buf)
-	local n = buffer.len(buf)
-	local out = table.create(math.ceil(n / 3) * 4)
-	local oi = 1
+local function base64EncodeBuffer(buf, byteLen)
+	if byteLen <= 0 then return "" end
+	local outLen = math.ceil(byteLen / 3) * 4
+	local out = buffer.create(outLen)
+	local o = 0
 	local i = 0
-	while i + 2 < n do
-		local a = buffer.readu8(buf, i)
-		local b = buffer.readu8(buf, i + 1)
-		local c = buffer.readu8(buf, i + 2)
-		local triple = a * 65536 + b * 256 + c
-		out[oi] = B64_ARR[bit32.band(bit32.rshift(triple, 18), 63)]
-		out[oi + 1] = B64_ARR[bit32.band(bit32.rshift(triple, 12), 63)]
-		out[oi + 2] = B64_ARR[bit32.band(bit32.rshift(triple, 6), 63)]
-		out[oi + 3] = B64_ARR[bit32.band(triple, 63)]
-		oi += 4
+	while i + 2 < byteLen do
+		local b0 = buffer.readu8(buf, i)
+		local b1 = buffer.readu8(buf, i + 1)
+		local b2 = buffer.readu8(buf, i + 2)
+		local n = b0 * 65536 + b1 * 256 + b2
+		buffer.writeu8(out, o, B64_ARR[bit32.rshift(n, 18) + 1])
+		buffer.writeu8(out, o + 1, B64_ARR[bit32.band(bit32.rshift(n, 12), 63) + 1])
+		buffer.writeu8(out, o + 2, B64_ARR[bit32.band(bit32.rshift(n, 6), 63) + 1])
+		buffer.writeu8(out, o + 3, B64_ARR[bit32.band(n, 63) + 1])
 		i += 3
+		o += 4
 	end
-	if i < n then
-		local a = buffer.readu8(buf, i)
-		local b = if i + 1 < n then buffer.readu8(buf, i + 1) else 0
-		local triple = a * 65536 + b * 256
-		out[oi] = B64_ARR[bit32.band(bit32.rshift(triple, 18), 63)]
-		out[oi + 1] = B64_ARR[bit32.band(bit32.rshift(triple, 12), 63)]
-		out[oi + 2] = if i + 1 < n then B64_ARR[bit32.band(bit32.rshift(triple, 6), 63)] else "="
-		out[oi + 3] = "="
+	local rem = byteLen - i
+	if rem == 1 then
+		local n = buffer.readu8(buf, i) * 65536
+		buffer.writeu8(out, o, B64_ARR[bit32.rshift(n, 18) + 1])
+		buffer.writeu8(out, o + 1, B64_ARR[bit32.band(bit32.rshift(n, 12), 63) + 1])
+		buffer.writeu8(out, o + 2, 61)
+		buffer.writeu8(out, o + 3, 61)
+	elseif rem == 2 then
+		local n = buffer.readu8(buf, i) * 65536 + buffer.readu8(buf, i + 1) * 256
+		buffer.writeu8(out, o, B64_ARR[bit32.rshift(n, 18) + 1])
+		buffer.writeu8(out, o + 1, B64_ARR[bit32.band(bit32.rshift(n, 12), 63) + 1])
+		buffer.writeu8(out, o + 2, B64_ARR[bit32.band(bit32.rshift(n, 6), 63) + 1])
+		buffer.writeu8(out, o + 3, 61)
 	end
-	return table.concat(out)
+	return buffer.tostring(out)
 end
+
 local function jsonEscape(s)
-	return (tostring(s):gsub("\\\\", "\\\\\\\\"):gsub('"', '\\\\"'):gsub("\\n", "\\\\n"))
+	return (tostring(s):gsub("\\\\", "\\\\\\\\"):gsub('"', '\\\\"'):gsub("\\n", "\\\\n"):gsub("\\r", ""))
 end
-local function toJson(val)
-	local tv = type(val)
+
+local function toJson(v)
+	local tv = type(v)
 	if tv == "nil" then return "null"
-	elseif tv == "boolean" then return if val then "true" else "false"
+	elseif tv == "boolean" then return if v then "true" else "false"
 	elseif tv == "number" then
-		if val ~= val or val == math.huge or val == -math.huge then return "0" end
-		return string.format("%.4g", val)
-	elseif tv == "string" then
-		return '"' .. jsonEscape(val) .. '"'
+		if v ~= v or v == math.huge or v == -math.huge then return "0" end
+		return tostring(v)
+	elseif tv == "string" then return '"' .. jsonEscape(v) .. '"'
 	elseif tv == "table" then
-		local isArr = (#val > 0) or next(val) == nil
-		if isArr then
-			local parts = {}
-			for i = 1, #val do parts[i] = toJson(val[i]) end
+		local isArr = true
+		local maxN = 0
+		local cnt = 0
+		for k, _ in pairs(v) do
+			cnt += 1
+			if type(k) ~= "number" or k < 1 or math.floor(k) ~= k then isArr = false; break end
+			if k > maxN then maxN = k end
+		end
+		if cnt == 0 then return "[]" end
+		if isArr and maxN == cnt then
+			local parts = table.create(cnt)
+			for i = 1, cnt do parts[i] = toJson(v[i]) end
 			return "[" .. table.concat(parts, ",") .. "]"
 		else
 			local parts = {}
-			for k, v in pairs(val) do
-				table.insert(parts, '"' .. jsonEscape(k) .. '":' .. toJson(v))
+			for k, val in pairs(v) do
+				table.insert(parts, '"' .. jsonEscape(tostring(k)) .. '":' .. toJson(val))
 			end
 			return "{" .. table.concat(parts, ",") .. "}"
 		end
@@ -292,461 +185,721 @@ local function toJson(val)
 	return "null"
 end
 
-local viewportFrame = Instance.new("Frame")
-viewportFrame.Size = UDim2.fromOffset(1280, 720)
-local cam = Camera2D.new(500, 250, 1280, 720)
-local canvas = MapCanvas.new(viewportFrame, cam)
-
-local function syncSimToCanvas(sim, mySmallId, full)
-	local payload = sim:BuildTickPayload(full)
-	if canvas.map == nil or canvas.map.id ~= payload.mapId then
-		canvas:LoadMap(payload.mapId)
-	end
-	canvas:UpdatePalettes(payload.players, mySmallId, payload.units)
-	if payload.tileBuffer ~= nil then
-		if payload.isFullSnapshot then
-			NetCodec.DecodeFullOwnerSnapshot(payload.tileBuffer, canvas.map.owner, canvas.map.size)
-			canvas:MarkAllDirty()
-		else
-			NetCodec.ApplyTileDeltas(payload.tileBuffer, canvas.map.owner, canvas.map.width, canvas.dirtyRows, canvas.dirtyTiles)
-		end
-	end
-	if payload.falloutBuffer ~= nil then
-		NetCodec.ApplyFalloutDeltas(payload.falloutBuffer, canvas.map.fallout, canvas.map.width, canvas.dirtyRows, canvas.dirtyTiles)
-	end
-	canvas:_FlushEditableImage()
-	return payload
+local SERVICES = {}
+local function makeInstance(className, parent)
+	local children = {}
+	local inst = setmetatable({ ClassName = className, Name = className }, {
+		__index = function(_t, k)
+			for _, c in ipairs(children) do if c.Name == k then return c end end
+			return nil
+		end,
+		__newindex = function(t, k, v)
+			rawset(t, k, v)
+			if k == "Parent" and v ~= nil then table.insert(v._children, t) end
+		end,
+	})
+	rawset(inst, "_children", children)
+	rawset(inst, "FindFirstChild", function(_s, name)
+		for _, c in ipairs(children) do if c.Name == name then return c end end
+		return nil
+	end)
+	rawset(inst, "WaitForChild", function(s, name)
+		return assert(s:FindFirstChild(name), "Missing child " .. tostring(name))
+	end)
+	if parent ~= nil then inst.Parent = parent end
+	return inst
 end
 
-local function capture(sim, payload, mySmallId, phase, uiMode, extra)
-	local topPlayers = {}
-	local sorted = table.clone(payload.players)
-	table.sort(sorted, function(a, b)
-		if a.tilesOwned ~= b.tilesOwned then return a.tilesOwned > b.tilesOwned end
-		return a.troops > b.troops
-	end)
-	for i = 1, math.min(18, #sorted) do
-		local p = sorted[i]
-		table.insert(topPlayers, {
+local Instance = { new = makeInstance }
+SERVICES.Workspace = makeInstance("Workspace")
+SERVICES.ReplicatedStorage = makeInstance("ReplicatedStorage")
+SERVICES.ServerScriptService = makeInstance("ServerScriptService")
+SERVICES.SoundService = makeInstance("SoundService")
+SERVICES.StarterGui = makeInstance("StarterGui")
+
+local game = {
+	GetService = function(_self, name) return SERVICES[name] end,
+	BindToClose = function() end,
+}
+
+local function requireModule(modInst)
+	if MODULE_CACHE[modInst] ~= nil then return MODULE_CACHE[modInst] end
+	local fn = assert(MODULES[modInst._rel], "Missing module " .. tostring(modInst._rel))
+	local res = fn(modInst)
+	MODULE_CACHE[modInst] = res
+	return res
+end
+local require = requireModule
+
+${moduleClosures}
+
+local sharedFolder = makeInstance("Folder", SERVICES.ReplicatedStorage)
+sharedFolder.Name = "OpenFrontShared"
+local serverFolder = makeInstance("Folder", SERVICES.ServerScriptService)
+serverFolder.Name = "OpenFrontServer"
+local clientFolder = makeInstance("Folder")
+clientFolder.Name = "OpenFrontClient"
+
+for rel, _ in pairs(MODULES) do
+	local parts = string.split(rel, "/")
+	local root = parts[1]
+	local cur = if root == "Shared" then sharedFolder elseif root == "Server" then serverFolder else clientFolder
+	for i = 2, #parts - 1 do
+		local sub = cur:FindFirstChild(parts[i]) or makeInstance("Folder", cur)
+		sub.Name = parts[i]
+		cur = sub
+	end
+	local leaf = parts[#parts]:gsub("%.server%.luau$", ""):gsub("%.client%.luau$", ""):gsub("%.luau$", "")
+	local ms = makeInstance("ModuleScript", cur)
+	ms.Name = leaf
+	ms._rel = rel
+end
+
+local Config = require(sharedFolder.Config)
+local MapCodec = require(sharedFolder.MapCodec)
+local MapsRegistry = require(sharedFolder.Maps.MapRegistry)
+local SimEngine = require(serverFolder.SimEngine)
+
+-- ============================================================================
+-- INITIALIZE OUR SINGLE 100% REAL, UNCUT, NON-CHEAT 1.0x MATCH ON 2000x1000 WORLD!
+-- ============================================================================
+local cfg = Config.DefaultGameConfig(true)
+cfg.mapId = "World"
+cfg.spawnNations = false
+cfg.bots = 24
+cfg.difficulty = "Easy"
+cfg.startingGold = 0
+cfg.goldMultiplier = 1
+cfg.instantBuild = false
+cfg.infiniteGold = false
+cfg.infiniteTroops = false
+
+local BOT_NAMES = {
+	{ name = "Atlas Imperium", flag = "us", col = "#ef4444" },
+	{ name = "Nordic Directorate", flag = "se", col = "#3b82f6" },
+	{ name = "Eurasian Steppe Khanate", flag = "ru", col = "#a855f7" },
+	{ name = "Pacific Shogunate", flag = "jp", col = "#f97316" },
+	{ name = "Amazonian Federation", flag = "br", col = "#22c55e" },
+	{ name = "Sahara Caliphate", flag = "eg", col = "#eab308" },
+	{ name = "Southern Cross Union", flag = "au", col = "#ec4899" },
+	{ name = "Rhine Coalition", flag = "de", col = "#f59e0b" },
+	{ name = "Gallic Republic", flag = "fr", col = "#6366f1" },
+	{ name = "Iberian Armada", flag = "es", col = "#dc2626" },
+	{ name = "Roman Legion", flag = "it", col = "#16a34a" },
+	{ name = "Anatolian Vanguard", flag = "tr", col = "#e11d48" },
+	{ name = "Andean Condor Pact", flag = "ar", col = "#38bdf8" },
+	{ name = "Maple Dominion", flag = "ca", col = "#fb7185" },
+	{ name = "Aztec Sun Empire", flag = "mx", col = "#10b981" },
+	{ name = "Savannah Kingdoms", flag = "ng", col = "#84cc16" },
+	{ name = "Abyssinian Crown", flag = "et", col = "#facc15" },
+	{ name = "Persian Immortal Host", flag = "ir", col = "#fb923c" },
+	{ name = "Sunda Archipelago Fleet", flag = "id", col = "#f43f5e" },
+	{ name = "Hussar Commonwealth", flag = "pl", col = "#c084fc" },
+	{ name = "Cossack Host", flag = "ua", col = "#60a5fa" },
+	{ name = "Albion Royal Navy", flag = "gb", col = "#818cf8" },
+	{ name = "Middle Kingdom", flag = "cn", col = "#ef4444" },
+	{ name = "Boreal Syndicate", flag = "no", col = "#2dd4bf" },
+}
+
+local sim = SimEngine.new(cfg, {
+	{ userId = 777001, name = "CommanderAyush", flag = "in", colorHex = "#06b6d4", patternId = "none" },
+}, false)
+
+-- Give each of the 24 autonomous bots a clean distinct name, flag, and rich non-cyan banner color!
+local bIdx = 0
+for _, p in ipairs(sim.playersList) do
+	if p.playerType ~= "Human" then
+		bIdx += 1
+		local spec = BOT_NAMES[((bIdx - 1) % #BOT_NAMES) + 1]
+		p.name = spec.name
+		p.flag = spec.flag
+		p.colorHex = spec.col
+	end
+end
+
+EMIT_TERRAIN("World", base64EncodeBuffer(sim.map.terrain, sim.map.size))
+
+local deltaPackBuf = buffer.create(sim.map.size * 6)
+local fallPackBuf = buffer.create(sim.map.size * 5)
+
+local function packAndDrainDeltas()
+	local dc = sim.deltaCount
+	local ownerB64 = ""
+	if dc > 0 then
+		for i = 1, dc do
+			local off = (i - 1) * 6
+			buffer.writeu32(deltaPackBuf, off, sim.deltaRefs[i])
+			buffer.writeu16(deltaPackBuf, off + 4, sim.deltaOwners[i])
+		end
+		ownerB64 = base64EncodeBuffer(deltaPackBuf, dc * 6)
+		sim.deltaCount = 0
+	end
+	local fc = sim.falloutDeltaCount
+	local fallB64 = ""
+	if fc > 0 then
+		for i = 1, fc do
+			local off = (i - 1) * 5
+			buffer.writeu32(fallPackBuf, off, sim.falloutDeltaRefs[i])
+			buffer.writeu8(fallPackBuf, off + 4, sim.falloutDeltaStates[i])
+		end
+		fallB64 = base64EncodeBuffer(fallPackBuf, fc * 5)
+		sim.falloutDeltaCount = 0
+	end
+	return ownerB64, fallB64
+end
+
+-- Smooth cinematic camera state (camX, camY, camScale) that tracks real frontline action cleanly!
+local camX, camY, camScale = 1000.0, 500.0, 0.64
+local targetCamX, targetCamY, targetCamScale = 1000.0, 500.0, 0.64
+
+local function setCameraTarget(tx, ty, ts)
+	targetCamX, targetCamY, targetCamScale = tx, ty, ts
+end
+
+local function stepSmoothCamera(alpha)
+	camX += (targetCamX - camX) * alpha
+	camY += (targetCamY - camY) * alpha
+	camScale += (targetCamScale - camScale) * alpha
+	local halfW = (1280 * 0.5) / camScale
+	local halfH = (720 * 0.5) / camScale
+	if halfW >= sim.map.width * 0.5 then
+		camX = sim.map.width * 0.5
+	else
+		camX = math.clamp(camX, halfW, sim.map.width - halfW)
+	end
+	if halfH >= sim.map.height * 0.5 then
+		camY = sim.map.height * 0.5
+	else
+		camY = math.clamp(camY, halfH, sim.map.height - halfH)
+	end
+end
+
+local me = sim.playersByUserId[777001]
+
+local function emitCurrentState(phase, uiMode, altView, extra)
+	local ownerB64, fallB64 = packAndDrainDeltas()
+	local playersOut = {}
+	for _, p in ipairs(sim.playersList) do
+		table.insert(playersOut, {
 			sid = p.smallId,
 			name = p.name,
-			flag = p.flag or "",
+			flag = p.flag,
 			col = p.colorHex,
-			type = p.playerType,
+			alive = p.alive,
 			tiles = p.tilesOwned,
 			troops = math.floor(p.troops),
-			maxTroops = math.floor(p.maxTroops),
-			rate = math.floor(p.troopRatePerSec or 0),
 			gold = math.floor(p.gold),
-			atk = math.floor(p.attackingTroops or 0),
 			lx = p.labelX,
 			ly = p.labelY,
 			lspan = p.labelSpan,
 			sx = p.spawnX,
 			sy = p.spawnY,
-			alive = p.alive,
-			traitor = p.isTraitor,
-			emoji = p.emoji or "",
-			counts = p.unitCounts or {},
 		})
 	end
-
-	local meSummary = nil
-	for _, p in ipairs(payload.players) do
-		if p.smallId == mySmallId then
-			meSummary = {
-				sid = p.smallId, name = p.name, flag = p.flag or "in", col = p.colorHex,
-				tiles = p.tilesOwned, troops = math.floor(p.troops), maxTroops = math.floor(p.maxTroops),
-				rate = math.floor(p.troopRatePerSec or 0), gold = math.floor(p.gold),
-				atk = math.floor(p.attackingTroops or 0), lx = p.labelX, ly = p.labelY,
-				sx = p.spawnX, sy = p.spawnY, alive = p.alive, counts = p.unitCounts or {},
-			}
-			break
+	table.sort(playersOut, function(a, b) return a.tiles > b.tiles end)
+	local unitsOut = {}
+	for _, u in ipairs(sim.units) do
+		if u.active then
+			table.insert(unitsOut, {
+				id = u.id,
+				t = u.unitType,
+				o = u.ownerSmallId,
+				x = u.x,
+				y = u.y,
+				dx = u.dstX or u.x,
+				dy = u.dstY or u.y,
+				lvl = u.level,
+				hp = u.hp,
+				mhp = u.maxHp,
+				vet = u.veterancy,
+				uc = u.underConstruction,
+				tr = u.troops,
+			})
 		end
 	end
+	local exploOut = table.clone(sim.explosions)
+	table.clear(sim.explosions)
 
-	local unitsOut = {}
-	for _, u in ipairs(payload.units or {}) do
-		table.insert(unitsOut, {
-			id = u.id, t = u.unitType, o = u.ownerSmallId,
-			x = u.x, y = u.y, dx = u.dstX, dy = u.dstY,
-			lv = u.level, hp = u.hp, mhp = u.maxHp, vet = u.veterancy,
-			uc = u.underConstruction, cp = u.constructionProgress or 0,
-			tr = math.floor(u.troops or 0),
-		})
+	local out = 0
+	for _, atk in ipairs(sim.attacks) do
+		if atk.active and atk.attackerSmallId == me.smallId then
+			out += atk.troops
+		end
 	end
+	local maxT = sim:GetMaxTroops(me)
+	local meOut = {
+		sid = me.smallId,
+		name = me.name,
+		flag = me.flag,
+		col = me.colorHex,
+		tiles = me.tilesOwned,
+		troops = math.floor(me.troops),
+		maxTroops = maxT,
+		rate = math.floor(Config.TroopIncreasePerTick(me.troops, maxT, me.playerType, sim.config) * 10),
+		gold = math.floor(me.gold),
+		atk = math.floor(out),
+		sx = me.spawnX,
+		sy = me.spawnY,
+	}
+
+	local spawnLeftTicks = math.max(0, sim.spawnPhaseTicks - sim.ticks)
+	local elapsedSec = math.max(0, (sim.ticks - sim.spawnPhaseTicks) / 10)
+	local winReq = Config.WinPercentageRequired(sim.config, elapsedSec)
 
 	local meta = {
 		phase = phase,
 		uiMode = uiMode,
-		mapId = payload.mapId,
-		mapName = sim.rawMap.name,
-		mapW = canvas.map.width,
-		mapH = canvas.map.height,
-		numLand = canvas.map.numLandTiles,
-		ticks = payload.ticks,
-		inSpawn = payload.inSpawnPhase,
-		spawnLeft = payload.spawnSecondsLeft,
-		elapsed = payload.elapsedSeconds,
-		winPct = payload.winPercentRequired,
-		camX = cam.centerX,
-		camY = cam.centerY,
-		camScale = cam.scale,
-		altView = canvas.altView,
-		mySid = mySmallId,
-		me = meSummary,
-		players = topPlayers,
+		mapId = "World",
+		mapName = "World (2000x1000 1:1)",
+		mapW = sim.map.width,
+		mapH = sim.map.height,
+		numLand = sim.map.numLandTiles,
+		ticks = sim.ticks,
+		inSpawn = sim.inSpawnPhase,
+		spawnLeft = spawnLeftTicks / 10,
+		elapsed = elapsedSec,
+		winPct = winReq,
+		altView = altView,
+		camX = camX,
+		camY = camY,
+		camScale = camScale,
+		mySid = me.smallId,
+		me = meOut,
+		players = playersOut,
 		units = unitsOut,
-		rails = payload.railEdges or {},
-		explosions = payload.explosions or {},
-		events = payload.events or {},
-		alerts = (payload.alertsByPlayer and payload.alertsByPlayer[mySmallId]) or {},
+		rails = if camScale >= 1.1 then (sim.railSegments or {}) else {},
+		events = sim.events,
+		explosions = exploOut,
 		extra = extra or {},
 	}
-	EMIT_FRAME(base64EncodeBuffer(canvas.pixelBuf), toJson(meta))
+	EMIT_TICK(ownerB64, fallB64, toJson(meta))
 end
 
 -- ============================================================================
--- ACT 1 (Frames 0..83): Main Menu over Live Animated AI World Battle + Host Modal
+-- PRE-MATCH UI: Main Menu (3.0s) + Singleplayer Setup Modal (3.0s)
 -- ============================================================================
-local previewCfg = Config.DefaultGameConfig(true)
-previewCfg.mapId = "World"
-previewCfg.bots = 55
-previewCfg.goldMultiplier = 4
-local previewSim = SimEngine.new(previewCfg, {}, true)
-for _ = 1, 90 do previewSim:Step() end
-syncSimToCanvas(previewSim, 0, true)
-cam:FocusOn(295, 112, 2.75)
-
-for f = 1, 44 do
-	previewSim:Step()
-	cam:FocusOn(295 + f * 0.45, 112, 2.75)
-	local pl = syncSimToCanvas(previewSim, 0, false)
-	capture(previewSim, pl, 0, "Act 1: Main Menu & Live World Preview", "MainMenu", { sfx = if f == 1 then "hover" else "" })
+local mapsMeta = {}
+for _, m in ipairs(MapsRegistry.List) do
+	table.insert(mapsMeta, {
+		id = m.id,
+		name = m.name,
+		nations = #m.nations,
+		w = m.width,
+		h = m.height,
+		pw = m.previewW or 100,
+		ph = m.previewH or 50,
+		preview = m.preview or "",
+	})
 end
 
--- Open Host Custom Match Modal showing all 10 Maps (World, Shinobi World, Europe, Asia...)
-local mapCards = {}
-for _, md in ipairs(MapRegistry.List) do
-	table.insert(mapCards, { id = md.id, name = md.name, nations = #md.nations, preview = md.preview, pw = md.previewW, ph = md.previewH })
+for f = 1, 30 do
+	setCameraTarget(1000, 490, 0.64)
+	stepSmoothCamera(0.25)
+	emitCurrentState("Main Menu & Live World Preview", "MainMenu", false, {
+		maps = if f == 1 then mapsMeta else nil,
+		cursor = { tx = 640, ty = 518, click = (f == 28) },
+		sfx = if f == 28 then "click" else "",
+	})
 end
-for f = 1, 40 do
-	previewSim:Step()
-	cam:FocusOn(315 + f * 0.35, 112, 2.75)
-	local pl = syncSimToCanvas(previewSim, 0, false)
-	local selMap = if f < 22 then "World" else "ShinobiWorld"
-	capture(previewSim, pl, 0, "Act 1B: Host Custom Lobby & 10-Map Picker", "HostModal", {
-		selectedMap = selMap,
-		maps = if f == 1 then mapCards else nil,
-		sfx = if f == 1 or f == 22 then "click" else "",
+
+for f = 1, 30 do
+	local sel = if f <= 14 then "World" elseif f <= 22 then "ShinobiWorld" else "World"
+	local ctx = if f <= 12 then 320 elseif f <= 20 then 320 elseif f <= 25 then 320 else 640
+	local cty = if f <= 12 then 196 elseif f <= 20 then 300 elseif f <= 25 then 196 else 598
+	emitCurrentState("Singleplayer Match Setup (1.0x Normal Speed)", "HostModal", false, {
+		selectedMap = sel,
+		cursor = { tx = ctx, ty = cty, click = (f == 15 or f == 23 or f == 29) },
+		sfx = if f == 15 or f == 23 then "click" elseif f == 29 then "spawn" else "",
 	})
 end
 
 -- ============================================================================
--- ACT 2 (Frames 84..148): Spawn Phase Selection in India & Early Expansion on World Map!
+-- COMPLETE UNCUT 1.0x MATCH: EVERY SINGLE TICK FROM 00:00 TO >=80% VICTORY!
 -- ============================================================================
-local matchCfg = Config.DefaultGameConfig(true)
-matchCfg.mapId = "World"
-matchCfg.bots = 18
-matchCfg.difficulty = "Hard"
-matchCfg.instantBuild = false
-matchCfg.goldMultiplier = 4
+-- Pick genuine fertile Northern India / Indo-Gangetic Plains spawn right south of the Himalayas!
+local SPAWN_X, SPAWN_Y = 1418, 378
+for r = 0, 40 do
+	local found = false
+	for dy = -r, r do
+		for dx = -r, r do
+			local px, py = 1418 + dx, 378 + dy
+			local pref = py * sim.map.width + px
+			if MapCodec.IsPlayableLand(sim.map, pref) and MapCodec.TerrainKind(sim.map, pref) == "Plains" then
+				SPAWN_X, SPAWN_Y = px, py
+				found = true
+				break
+			end
+		end
+		if found then break end
+	end
+	if found then break end
+end
 
-local worldSim = SimEngine.new(matchCfg, {
-	{ userId = 777001, name = "Republic of India", flag = "in", colorHex = "#06b6d4", patternId = "none" },
-}, false)
-
--- Locate Northern India / Gangetic plain on World Map!
-local indiaX, indiaY = 352, 112
-for _, nat in ipairs(worldSim.rawMap.nations) do
-	if string.find(string.lower(nat.name), "india") or string.find(string.lower(nat.name), "delhi") or string.find(string.lower(nat.name), "bharat") then
-		indiaX, indiaY = math.clamp(nat.x + 6, 10, worldSim.map.width - 10), math.clamp(nat.y + 4, 10, worldSim.map.height - 10)
-		break
+local allShores = {}
+for ref = 0, sim.map.size - 1, 29 do
+	if MapCodec.IsShoreLand(sim.map, ref) then
+		table.insert(allShores, ref)
 	end
 end
-worldSim:ChooseSpawn(777001, indiaX, indiaY)
-local meWorld = worldSim.playersByUserId[777001]
-syncSimToCanvas(worldSim, meWorld.smallId, true)
-cam:FocusOn(indiaX, indiaY, 4.2)
+local nbuf = { 0, 0, 0, 0 }
 
--- Show Spawn Phase countdown smoothly
-for f = 1, 34 do
-	worldSim:Step()
-	worldSim:Step()
-	cam:FocusOn(indiaX, indiaY, 4.2 + f * 0.04)
-	local pl = syncSimToCanvas(worldSim, meWorld.smallId, false)
-	capture(worldSim, pl, meWorld.smallId, "Act 2: Spawn Phase Selection (India)", "InGame", {
-		sfx = if f == 1 then "click" else "",
-	})
+local function worldToScreen(wx, wy)
+	return math.clamp(640 + (wx - camX) * camScale, 28, 1252), math.clamp(360 + (wy - camY) * camScale, 28, 692)
 end
 
--- Unlock borders & expand rapidly across South Asia + Bay of Bengal!
-while worldSim.inSpawnPhase do worldSim:Step() end
-meWorld.troops = 140_000
-meWorld.gold = 4_500_000
+local function activeAttackTroops(targetId)
+	local tot = 0
+	for _, atk in ipairs(sim.attacks) do
+		if atk.active and atk.attackerSmallId == me.smallId and atk.targetSmallId == targetId then
+			tot += atk.troops
+		end
+	end
+	return tot
+end
 
-for f = 1, 70 do
-	if f % 8 == 1 then
-		worldSim:StartLandAttack(meWorld, 0, meWorld.troops * 0.45, nil)
-		for _, other in ipairs(worldSim.playersList) do
-			if other ~= meWorld and other.alive and other.tilesOwned < meWorld.tilesOwned * 1.4 then
-				local dx, dy = other.labelX - meWorld.labelX, other.labelY - meWorld.labelY
-				if dx * dx + dy * dy < 38 * 38 then
-					worldSim:StartLandAttack(meWorld, other.smallId, meWorld.troops * 0.35, nil)
+local lastAliveBots = 25
+local recentNukeX, recentNukeY, recentNukeUntil = -1, -1, -1
+local firstBoatFocusUntil = -1
+local boatFocusX, boatFocusY = -1, -1
+local showedBoatZoom = false
+local curTargetWX, curTargetWY = SPAWN_X, SPAWN_Y
+local clickPulse = false
+
+for t = 1, 2600 do
+	local sfx = ""
+	clickPulse = false
+
+	-- Human player moves mouse to Northern India & left-clicks spawn at tick 18 (1.8s into 10.0s countdown)!
+	if t == 18 then
+		sim:ChooseSpawn(777001, SPAWN_X, SPAWN_Y)
+		sfx = "spawn"
+		clickPulse = true
+	end
+
+	sim:Step()
+
+	if t == sim.spawnPhaseTicks then
+		sfx = "attack"
+	end
+
+	local landPctPre = (me.tilesOwned / math.max(1, sim.map.numLandTiles)) * 100
+
+	if not sim.inSpawnPhase and me.alive and not sim.gameOver then
+		local maxT = sim:GetMaxTroops(me)
+		local ratio = me.troops / math.max(1, maxT)
+		local bCount = #me.borderList
+
+		-- 1. Frugal Grandmaster Economy & Arsenal (100% earned tax + trade + train gold -> 25.0M Orbital MIRV!)
+		if t % 12 == 0 and bCount > 0 then
+			local cityCost = Config.UnitCost("City", me.unitCounts, sim.mirvsLaunched, false, true)
+			local portCost = Config.UnitCost("Port", me.unitCounts, sim.mirvsLaunched, false, true)
+			local facCost = Config.UnitCost("Factory", me.unitCounts, sim.mirvsLaunched, false, true)
+			local siloCost = Config.UnitCost("MissileSilo", me.unitCounts, sim.mirvsLaunched, false, true)
+			local samCost = Config.UnitCost("SAMLauncher", me.unitCounts, sim.mirvsLaunched, false, true)
+			local dpCost = Config.UnitCost("DefensePost", me.unitCounts, sim.mirvsLaunched, false, true)
+
+			if (me.unitCounts["DefensePost"] or 0) < 1 and me.gold >= dpCost then
+				for s = 1, 20 do
+					local r = me.borderList[((t * 3 + s * 11) % #me.borderList) + 1]
+					if r and sim:BuildUnit(me, "DefensePost", r) then
+						sfx = "build"; curTargetWX = r % sim.map.width; curTargetWY = math.floor(r / sim.map.width); clickPulse = true; break
+					end
+				end
+			elseif (me.unitCounts["City"] or 0) < 3 and ratio > 0.36 and me.gold >= cityCost then
+				for s = 1, 20 do
+					local r = me.borderList[((t * 7 + s * 13) % #me.borderList) + 1]
+					if r and sim:BuildUnit(me, "City", r) then
+						sfx = "build"; curTargetWX = r % sim.map.width; curTargetWY = math.floor(r / sim.map.width); clickPulse = true; break
+					end
+				end
+			elseif (me.unitCounts["Port"] or 0) < 2 and me.gold >= portCost then
+				for s = 1, math.min(90, #me.borderList) do
+					local r = me.borderList[((t * 11 + s) % #me.borderList) + 1]
+					if r and MapCodec.IsShoreLand(sim.map, r) and sim:BuildUnit(me, "Port", r) then
+						sfx = "build"; curTargetWX = r % sim.map.width; curTargetWY = math.floor(r / sim.map.width); clickPulse = true; break
+					end
+				end
+			elseif (me.unitCounts["Factory"] or 0) < 2 and me.gold >= facCost then
+				for s = 1, 20 do
+					local r = me.borderList[((t * 13 + s * 9) % #me.borderList) + 1]
+					if r and sim:BuildUnit(me, "Factory", r) then
+						sfx = "build"; curTargetWX = r % sim.map.width; curTargetWY = math.floor(r / sim.map.width); clickPulse = true; break
+					end
+				end
+			elseif (me.unitCounts["MissileSilo"] or 0) < 1 and me.gold >= siloCost then
+				for s = 1, 20 do
+					local r = me.borderList[((t * 17 + s * 7) % #me.borderList) + 1]
+					if r and sim:BuildUnit(me, "MissileSilo", r) then
+						sfx = "build"; curTargetWX = r % sim.map.width; curTargetWY = math.floor(r / sim.map.width); clickPulse = true; break
+					end
+				end
+			elseif (me.unitCounts["SAMLauncher"] or 0) < 1 and me.gold >= samCost then
+				for s = 1, 20 do
+					local r = me.borderList[((t * 19 + s * 5) % #me.borderList) + 1]
+					if r and sim:BuildUnit(me, "SAMLauncher", r) then
+						sfx = "build"; curTargetWX = r % sim.map.width; curTargetWY = math.floor(r / sim.map.width); clickPulse = true; break
+					end
+				end
+			elseif (me.unitCounts["Port"] or 0) >= 1 and (me.unitCounts["Warship"] or 0) < 2 and me.gold >= 500000 then
+				for s = 1, math.min(80, #me.borderList) do
+					local r = me.borderList[((t * 5 + s) % #me.borderList) + 1]
+					local wr = if r then MapCodec.AdjacentWater(sim.map, r) else nil
+					if wr ~= nil and sim:BuildUnit(me, "Warship", wr) then sfx = "boat"; break end
+				end
+			end
+
+			-- Launch 1 early Atom Bomb, then bank real empire tax revenue for Earned 25.0M Orbital MIRV + H-Bomb!
+			if (me.unitCounts["MissileSilo"] or 0) >= 1 and t % 12 == 0 then
+				local bigRival, bigTiles = nil, 0
+				for _, p in ipairs(sim.playersList) do
+					if p ~= me and p.alive and not sim:AreFriendly(me, p) and p.tilesOwned > bigTiles then
+						bigTiles = p.tilesOwned
+						bigRival = p
+					end
+				end
+				if bigRival ~= nil and bigRival.tilesOwned > 1500 then
+					local tr = bigRival.labelY * sim.map.width + bigRival.labelX
+					local launched = false
+					if sim.mirvsLaunched == 0 and me.gold >= 25000000 then
+						launched = sim:BuildUnit(me, "MIRV", tr)
+					elseif sim.mirvsLaunched >= 1 and me.gold >= 5000000 then
+						launched = sim:BuildUnit(me, "HydrogenBomb", tr)
+					elseif me.nukesSent == 0 and me.gold >= 950000 and t < 900 then
+						launched = sim:BuildUnit(me, "AtomBomb", tr)
+					end
+					if launched then
+						sfx = "launch"
+						recentNukeX = bigRival.labelX
+						recentNukeY = bigRival.labelY
+						recentNukeUntil = t + 115
+						curTargetWX, curTargetWY = bigRival.labelX, bigRival.labelY
+						clickPulse = true
+					end
+				end
+			end
+		end
+
+		-- 2. Bell-Curve Manpower Management + Pause Blitz at 73% just long enough to fire Earned 25M Orbital MIRV!
+		local waitingForMirvSalvo = (sim.mirvsLaunched == 0 and landPctPre >= 72.5 and t < 1750)
+		local mirvInAir = false
+		if sim.mirvsLaunched >= 1 then
+			for _, u in ipairs(sim.units) do
+				if u.active and (u.unitType == "MIRV" or u.unitType == "MIRVWarhead") then
+					mirvInAir = true
 					break
 				end
 			end
 		end
-	end
-	-- Step 3 ticks per frame so continents consolidate into crisp solid empires just like openfront.io!
-	worldSim:Step()
-	worldSim:Step()
-	worldSim:Step()
-	cam:FocusOn(meWorld.labelX, meWorld.labelY, math.max(3.1, 4.8 - f * 0.022))
-	local pl = syncSimToCanvas(worldSim, meWorld.smallId, false)
-	capture(worldSim, pl, meWorld.smallId, "Act 2B: Rapid Border Expansion", "InGame", {
-		radialOpen = (f >= 44 and f <= 66),
-		sfx = if f == 1 or f == 44 then "attack" else "",
-	})
-end
 
--- ============================================================================
--- ACT 3: Economy Boom — Cities, Factories, Railroads, Gold Trains, Ports, Trade Ships & Warships!
--- ============================================================================
-local ownedWorld = {}
-local coastalWorld = {}
-for ref = 0, worldSim.map.size - 1 do
-	if MapCodec.GetOwner(worldSim.map, ref) == meWorld.smallId then
-		table.insert(ownedWorld, ref)
-		if MapCodec.IsShoreLand(worldSim.map, ref) then
-			table.insert(coastalWorld, ref)
-		end
-	end
-end
+		if t % 6 == 0 and bCount > 0 and (not waitingForMirvSalvo) and (not mirvInAir or landPctPre < 76.0) then
+			local hasUnclaimed = false
+			local seenEnemy = {}
+			local borderEnemies = {}
+			for s = 1, math.min(600, bCount) do
+				local bRef = me.borderList[((t * 23 + s) % bCount) + 1]
+				if bRef then
+					local n = MapCodec.Neighbors4(sim.map, bRef, nbuf)
+					for i = 1, n do
+						local nb = nbuf[i]
+						if MapCodec.IsPlayableLand(sim.map, nb) then
+							local oid = MapCodec.GetOwner(sim.map, nb)
+							if oid == 0 then
+								hasUnclaimed = true
+							elseif oid ~= me.smallId and not seenEnemy[oid] then
+								seenEnemy[oid] = true
+								local ep = sim.playersBySmallId[oid]
+								if ep and ep.alive and not sim:AreFriendly(me, ep) then
+									table.insert(borderEnemies, ep)
+								end
+							end
+						end
+					end
+				end
+			end
 
-meWorld.gold = 18_000_000
-worldSim.config.instantBuild = true
-if #ownedWorld >= 20 then
-	worldSim:BuildUnit(meWorld, "City", ownedWorld[math.floor(#ownedWorld * 0.20)])
-	worldSim:BuildUnit(meWorld, "Factory", ownedWorld[math.floor(#ownedWorld * 0.40)])
-	worldSim:BuildUnit(meWorld, "City", ownedWorld[math.floor(#ownedWorld * 0.60)])
-	worldSim:BuildUnit(meWorld, "MissileSilo", ownedWorld[math.floor(#ownedWorld * 0.50)])
-	worldSim:BuildUnit(meWorld, "SAMLauncher", ownedWorld[math.floor(#ownedWorld * 0.72)])
-	worldSim:BuildUnit(meWorld, "DefensePost", ownedWorld[math.floor(#ownedWorld * 0.12)])
-end
-for i = 1, math.min(3, #coastalWorld) do
-	local cRef = coastalWorld[math.floor((i / 3) * #coastalWorld)]
-	worldSim:BuildUnit(meWorld, "Port", cRef)
-	local wRef = MapCodec.AdjacentWater(worldSim.map, cRef)
-	if wRef ~= nil and i <= 2 then
-		worldSim:BuildUnit(meWorld, "Warship", wRef)
-	end
-end
--- Launch an amphibious Boat invasion across the Indian Ocean too!
-for _, other in ipairs(worldSim.playersList) do
-	if other ~= meWorld and other.alive and other.tilesOwned > 25 then
-		local dx = math.abs(other.labelX - meWorld.labelX)
-		if dx > 25 and dx < 95 then
-			worldSim:LaunchBoatAttack(meWorld, other.labelY * worldSim.map.width + other.labelX, meWorld.troops * 0.28)
-			break
-		end
-	end
-end
+			local floorFrac = if t < 240 then 0.20 else 0.35
+			local surplus = math.max(0, me.troops - maxT * floorFrac)
 
-for f = 1, 78 do
-	worldSim:Step()
-	worldSim:Step()
-	if f % 14 == 0 then
-		for _, other in ipairs(worldSim.playersList) do
-			if other ~= meWorld and other.alive and math.abs(other.labelX - meWorld.labelX) < 55 and math.abs(other.labelY - meWorld.labelY) < 45 then
-				worldSim:StartLandAttack(meWorld, other.smallId, meWorld.troops * 0.35, nil)
-				break
+			if hasUnclaimed and activeAttackTroops(0) < 25000 and surplus > 1500 then
+				local spend = math.min(surplus * 0.45, 140000)
+				sim:StartLandAttack(me, 0, spend, nil)
+				surplus -= spend
+			end
+
+			if surplus > 3000 and #borderEnemies > 0 then
+				table.sort(borderEnemies, function(a, b) return a.troops < b.troops end)
+				local nTargets = math.min(6, #borderEnemies)
+				for idx = 1, nTargets do
+					local ep = borderEnemies[idx]
+					if activeAttackTroops(ep.smallId) < ep.troops * 1.6 + 25000 and surplus > 1500 then
+						local spend = surplus / math.max(1, nTargets - idx + 1)
+						sim:StartLandAttack(me, ep.smallId, spend, nil)
+						curTargetWX, curTargetWY = ep.labelX, ep.labelY
+						if t % 24 == 0 then clickPulse = true end
+						surplus -= spend
+					end
+				end
+			end
+
+			if surplus > 15000 and (me.unitCounts["TransportShip"] or 0) < 5 then
+				for attempt = 1, 60 do
+					local cref = allShores[((t * 37 + attempt * 97) % #allShores) + 1]
+					local oid = MapCodec.GetOwner(sim.map, cref)
+					if oid ~= me.smallId and not seenEnemy[oid] then
+						local ep = if oid > 0 then sim.playersBySmallId[oid] else nil
+						if ep == nil or not sim:AreFriendly(me, ep) then
+							local sendB = math.min(surplus * 0.45, 180000)
+							if sim:LaunchBoatAttack(me, cref, sendB) then
+								surplus -= sendB
+								curTargetWX = cref % sim.map.width
+								curTargetWY = math.floor(cref / sim.map.width)
+								clickPulse = true
+								if sfx == "" then sfx = "boat" end
+								if not showedBoatZoom and t > 620 then
+									showedBoatZoom = true
+									boatFocusX = curTargetWX
+									boatFocusY = curTargetWY
+									firstBoatFocusUntil = t + 65
+								end
+								break
+							end
+						end
+					end
+				end
 			end
 		end
 	end
-	cam:FocusOn(meWorld.labelX, meWorld.labelY + 6, 4.35)
-	local pl = syncSimToCanvas(worldSim, meWorld.smallId, false)
-	capture(worldSim, pl, meWorld.smallId, "Act 3: Cities, Railroads, Trade Ships & Naval Invasion", "InGame", {
-		buildMenuOpen = (f >= 14 and f <= 44),
-		sfx = if f == 1 then "build" elseif f == 14 then "click" elseif f == 46 then "boat" else "",
-	})
-end
 
--- ============================================================================
--- ACT 4: Thermonuclear Escalation — Atom Bomb + Hydrogen Bomb + Multi-Warhead MIRV Carpet Strike!
--- ============================================================================
-meWorld.gold = 95_000_000
--- Build 3 Missile Silos so we can salvo AtomBomb + HydrogenBomb + MIRV together in cinematic glory!
-if #ownedWorld >= 30 then
-	worldSim:BuildUnit(meWorld, "MissileSilo", ownedWorld[math.floor(#ownedWorld * 0.30)])
-	worldSim:BuildUnit(meWorld, "MissileSilo", ownedWorld[math.floor(#ownedWorld * 0.66)])
-end
+	-- Detect eliminations & nuclear detonations for synchronized stereo audio FX!
+	local curAlive = 0
+	for _, p in ipairs(sim.playersList) do
+		if p.alive and p.tilesOwned > 0 then curAlive += 1 end
+	end
+	if not sim.inSpawnPhase and curAlive < lastAliveBots and sfx == "" then
+		sfx = "attack"
+	end
+	lastAliveBots = curAlive
 
-local nukeTarget = nil
-local bestEnemyTiles = 0
-for _, other in ipairs(worldSim.playersList) do
-	if other ~= meWorld and other.alive then
-		local dx = math.abs(other.labelX - meWorld.labelX)
-		local dy = math.abs(other.labelY - meWorld.labelY)
-		if dx < 120 and dy < 75 and other.tilesOwned > bestEnemyTiles then
-			bestEnemyTiles = other.tilesOwned
-			nukeTarget = other
+	if #sim.explosions > 0 then
+		sfx = "boom"
+	end
+
+	-- Dynamic camera framing across the 1.0x match so viewers see BOTH crisp unit details & global expansion!
+	local landPct = (me.tilesOwned / math.max(1, sim.map.numLandTiles)) * 100
+	local altView = (t >= 680 and t <= 745)
+	local radialOpen = (t >= 250 and t <= 285)
+	local buildMenuOpen = (t >= 510 and t <= 545)
+
+	if t == 250 or t == 510 or t == 680 or t == 746 then
+		if sfx == "" then sfx = "click" end
+		clickPulse = true
+	end
+
+	local phaseTitle = "1.0x Speed | Spawn Selection"
+	if sim.inSpawnPhase then
+		phaseTitle = "1.0x Speed | Spawn Countdown (" .. tostring(math.ceil(math.max(0, sim.spawnPhaseTicks - t) / 10)) .. "s)"
+		setCameraTarget(SPAWN_X, SPAWN_Y + 12, 2.35)
+	elseif t < 400 then
+		phaseTitle = "1.0x Speed | Heartland Expansion"
+		setCameraTarget(me.labelX, me.labelY + 12, 2.05 - (t - 100) * 0.0018)
+	elseif t < 760 then
+		phaseTitle = if altView
+			then "1.0x Speed | Alt-View & Naval Trade"
+			else "1.0x Speed | Cities, Trains & Fleets"
+		if t < firstBoatFocusUntil and boatFocusX >= 0 then
+			setCameraTarget((me.labelX + boatFocusX) * 0.5, (me.labelY + boatFocusY) * 0.5, 1.15)
+		else
+			setCameraTarget(me.labelX, me.labelY + 15, 1.38)
+		end
+	elseif t < 1120 then
+		phaseTitle = "1.0x Speed | Continental D-Day Wars"
+		setCameraTarget(1120, 440, 0.86)
+	else
+		phaseTitle = string.format("1.0x Speed | Global Blitz (%.1f%%)", landPct)
+		if t < recentNukeUntil and recentNukeX >= 0 and landPct < 78 then
+			setCameraTarget((me.labelX + recentNukeX) * 0.5, (me.labelY + recentNukeY) * 0.5, 0.82)
+		else
+			setCameraTarget(1000, 500, 0.64)
 		end
 	end
-end
-if nukeTarget ~= nil then
-	local tref = nukeTarget.labelY * worldSim.map.width + nukeTarget.labelX
-	worldSim:BuildUnit(meWorld, "MIRV", tref)
-	worldSim:BuildUnit(meWorld, "HydrogenBomb", math.clamp(tref + 14, 0, worldSim.map.size - 1))
-	worldSim:BuildUnit(meWorld, "AtomBomb", math.clamp(tref - 14, 0, worldSim.map.size - 1))
-end
 
-local midX = if nukeTarget then (meWorld.labelX + nukeTarget.labelX) * 0.5 else meWorld.labelX
-local midY = if nukeTarget then (meWorld.labelY + nukeTarget.labelY) * 0.5 else meWorld.labelY
+	stepSmoothCamera(0.085)
 
-for f = 1, 88 do
-	worldSim:Step()
-	cam:FocusOn(midX, midY, 3.25)
-	local pl = syncSimToCanvas(worldSim, meWorld.smallId, false)
-	local sfx = ""
-	if f == 1 then sfx = "launch"
-	elseif f == 10 then sfx = "alert"
-	elseif #(pl.explosions or {}) > 0 then sfx = "boom"
+	local csx, csy = worldToScreen(curTargetWX, curTargetWY)
+	if radialOpen then
+		csx, csy = 640 + 86 + 62, 360 - 18
+	elseif buildMenuOpen then
+		csx, csy = 640 - 110, 360 - 52
+	elseif altView and t <= 692 then
+		csx, csy = 290, 668
 	end
-	capture(worldSim, pl, meWorld.smallId, "Act 4: MIRV Multi-Warhead & Hydrogen Bomb Salvo", "InGame", { sfx = sfx })
-end
 
--- ============================================================================
--- ACT 5: Custom Shinobi World Ninja Villages Showcase (Konohagakure vs Five Great Nations!)
--- ============================================================================
-local shinobiCfg = Config.DefaultGameConfig(true)
-shinobiCfg.mapId = "ShinobiWorld"
-shinobiCfg.bots = 8
-shinobiCfg.instantBuild = true
-shinobiCfg.goldMultiplier = 5
-
-local shinobiSim = SimEngine.new(shinobiCfg, {
-	{ userId = 777001, name = "Konoha Allied Forces", flag = "konoha", colorHex = "#ef4444", patternId = "stripes" },
-}, false)
-local konohaSp = shinobiSim.rawMap.nations[1]
-shinobiSim:ChooseSpawn(777001, math.clamp(konohaSp.x + 22, 12, shinobiSim.map.width - 12), math.clamp(konohaSp.y + 12, 12, shinobiSim.map.height - 12))
-local meShinobi = shinobiSim.playersByUserId[777001]
-while shinobiSim.inSpawnPhase do shinobiSim:Step() end
-meShinobi.troops = 260_000
-meShinobi.gold = 60_000_000
-for step = 1, 95 do
-	if step % 12 == 1 then
-		shinobiSim:StartLandAttack(meShinobi, 0, meShinobi.troops * 0.5, nil)
-	end
-	shinobiSim:Step()
-end
-local shinobiOwned = {}
-for ref = 0, shinobiSim.map.size - 1 do
-	if MapCodec.GetOwner(shinobiSim.map, ref) == meShinobi.smallId then
-		table.insert(shinobiOwned, ref)
+	if sim.gameOver then
+		sfx = "victory"
+		setCameraTarget(1000, 500, 0.64)
+		stepSmoothCamera(0.35)
+		emitCurrentState(
+			string.format("1.0x Victory — %.1f%% World Conquered!", landPct),
+			"InGame",
+			false,
+			{ sfx = "victory", cursor = { tx = 640, ty = 360, click = false } }
+		)
+		break
+	else
+		emitCurrentState(phaseTitle, "InGame", altView, {
+			radialOpen = radialOpen,
+			buildMenuOpen = buildMenuOpen,
+			cursor = { tx = math.floor(csx), ty = math.floor(csy), click = clickPulse },
+			sfx = sfx,
+		})
 	end
 end
-if #shinobiOwned > 25 then
-	shinobiSim:BuildUnit(meShinobi, "City", shinobiOwned[math.floor(#shinobiOwned * 0.25)])
-	shinobiSim:BuildUnit(meShinobi, "Factory", shinobiOwned[math.floor(#shinobiOwned * 0.55)])
-	shinobiSim:BuildUnit(meShinobi, "MissileSilo", shinobiOwned[math.floor(#shinobiOwned * 0.40)])
-	shinobiSim:BuildUnit(meShinobi, "SAMLauncher", shinobiOwned[math.floor(#shinobiOwned * 0.70)])
-end
-syncSimToCanvas(shinobiSim, meShinobi.smallId, true)
 
-for f = 1, 64 do
-	if f == 28 then
-		canvas.altView = true
-		canvas:MarkAllDirty()
-	elseif f == 50 then
-		canvas.altView = false
-		canvas:MarkAllDirty()
-	end
-	if f == 12 then
-		for _, op in ipairs(shinobiSim.playersList) do
-			if op ~= meShinobi and op.alive and op.tilesOwned > 40 then
-				shinobiSim:BuildUnit(meShinobi, "AtomBomb", op.labelY * shinobiSim.map.width + op.labelX)
-				shinobiSim:StartLandAttack(meShinobi, op.smallId, meShinobi.troops * 0.45, nil)
-				break
-			end
-		end
-	end
-	shinobiSim:Step()
-	shinobiSim:Step()
-	cam:FocusOn(meShinobi.labelX, meShinobi.labelY, 2.55 + f * 0.015)
-	local pl = syncSimToCanvas(shinobiSim, meShinobi.smallId, false)
-	local sfx = ""
-	if f == 12 then sfx = "launch"
-	elseif #(pl.explosions or {}) > 0 then sfx = "boom"
-	elseif f == 28 then sfx = "click"
-	end
-	capture(shinobiSim, pl, meShinobi.smallId, "Act 5: Shinobi World Map & Tactical Alt-View", "InGame", { sfx = sfx })
+-- Hold 6.5s (65 ticks) on the Final Victory & XP Level-Up Ceremony over the real conquered 2000x1000 map!
+local finalPct = (me.tilesOwned / math.max(1, sim.map.numLandTiles)) * 100
+for f = 1, 65 do
+	setCameraTarget(1000, 500, 0.64)
+	stepSmoothCamera(0.25)
+	emitCurrentState(
+		string.format("Victory Ceremony — %.1f%% World Conquered at 1.0x Speed!", finalPct),
+		"Victory",
+		false,
+		{
+			victory = true,
+			xpGained = 4850,
+			newLevel = 4,
+			sfx = if f == 12 then "click" else "",
+		}
+	)
 end
 
--- ============================================================================
--- ACT 6: Final World Conquest Push -> >94% Land Share -> VICTORY CEREMONY MODAL!
--- ============================================================================
-canvas.altView = false
-canvas:MarkAllDirty()
-
-local landRefs = {}
-for ref = 0, worldSim.map.size - 1 do
-	if MapCodec.IsPlayableLand(worldSim.map, ref) then
-		table.insert(landRefs, ref)
-	end
-end
-table.sort(landRefs, function(a, b)
-	local ax, ay = a % worldSim.map.width, math.floor(a / worldSim.map.width)
-	local bx, by = b % worldSim.map.width, math.floor(b / worldSim.map.width)
-	local da = (ax - indiaX) * (ax - indiaX) + (ay - indiaY) * (ay - indiaY)
-	local db = (bx - indiaX) * (bx - indiaX) + (by - indiaY) * (by - indiaY)
-	return da < db
-end)
-
-syncSimToCanvas(worldSim, meWorld.smallId, true)
-cam:FitWorld()
-
-local targetConquerCount = math.floor(#landRefs * 0.95)
-local sweepCursor = 1
-local perFrameConquer = math.ceil(targetConquerCount / 34)
-for f = 1, 68 do
-	worldSim:Step()
-	if sweepCursor <= targetConquerCount then
-		for _ = 1, perFrameConquer do
-			if sweepCursor > targetConquerCount then break end
-			worldSim:ConquerTile(meWorld.smallId, landRefs[sweepCursor])
-			sweepCursor += 1
-		end
-	end
-	-- Keep already-swept radial zone cleanly consolidated under Republic of India (no stray reconquest speckles!)
-	if f >= 34 then
-		for i = 1, targetConquerCount do
-			local r = landRefs[i]
-			if MapCodec.GetOwner(worldSim.map, r) ~= meWorld.smallId then
-				worldSim:ConquerTile(meWorld.smallId, r)
-			end
-		end
-	end
-	cam:FitWorld()
-	local pl = syncSimToCanvas(worldSim, meWorld.smallId, f >= 34)
-	local showVictoryModal = f >= 38
-	capture(worldSim, pl, meWorld.smallId, "Act 6: Global Conquest & Victory XP Ceremony", if showVictoryModal then "Victory" else "InGame", {
-		victory = showVictoryModal,
-		xpGained = 4180,
-		newLevel = 4,
-		sfx = if f == 38 then "victory" elseif f % 10 == 0 and f < 38 then "attack" else "",
-	})
-end
-
-return true
+return toJson({
+	ticksPlayed = sim.ticks,
+	gameOver = sim.gameOver,
+	winner = sim.winnerName,
+	finalPct = finalPct,
+	nukesSent = me.nukesSent,
+	mirvs = sim.mirvsLaunched,
+})
 `;
 
 const vm = await LuauState.createAsync();
+let summary = null;
 try {
   const fn = vm.loadstring(RECORD_SCRIPT, "=play_and_record.luau", true);
-  await fn(emitFrame);
+  const rawRes = await fn(emitTerrain, emitTick);
+  summary = JSON.parse(Array.isArray(rawRes) ? rawRes[0] : rawRes);
 } finally {
   metaStream.end();
+  fs.closeSync(deltaFd);
   vm.destroy();
 }
-console.log(`[luau-recorder] DONE! Total captured frames: ${frameIdx}`);
+console.log(
+  `[luau-recorder] COMPLETE FULL 1.0x MATCH FINISHED! Total tick-frames: ${tickFrameIdx}`,
+  summary,
+);
+if (!summary?.gameOver || summary?.winner !== "CommanderAyush") {
+  throw new Error(
+    `Expected genuine natural gameOver win by CommanderAyush, got: ${JSON.stringify(summary)}`,
+  );
+}

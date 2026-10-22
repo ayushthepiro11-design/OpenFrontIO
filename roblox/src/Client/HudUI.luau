@@ -533,6 +533,73 @@ function HudUI:_BuildMinimapAndFeed()
 	self.miniMapPreview = miniMapPreview
 	self.lastMiniMapId = ""
 
+	local miniLiveImg = Instance.new("ImageLabel")
+	miniLiveImg.Name = "MinimapLiveTexture"
+	miniLiveImg.Position = UDim2.fromOffset(5, 5)
+	miniLiveImg.Size = UDim2.new(1, -10, 1, -10)
+	miniLiveImg.BackgroundTransparency = 1
+	miniLiveImg.BorderSizePixel = 0
+	miniLiveImg.ResampleMode = Enum.ResamplerMode.Pixelated
+	miniLiveImg.Visible = false
+	miniLiveImg.ZIndex = 21
+	UiWidgets.AddCorner(miniLiveImg, 6)
+	miniLiveImg.Parent = miniCard
+	self.miniLiveImg = miniLiveImg
+	self.boundMiniObj = nil :: any
+
+	-- Compact Mobile-First Quick Gear/Speed Strip (Top-Left beside Alerts, never collides with Leaderboard!)
+	local quickStrip = Instance.new("Frame")
+	quickStrip.Name = "QuickControlStrip"
+	quickStrip.Position = UDim2.fromOffset(14, 14)
+	quickStrip.Size = UDim2.fromOffset(224, 30)
+	quickStrip.BackgroundColor3 = Theme.UI.BgPanel
+	quickStrip.BackgroundTransparency = 0.12
+	quickStrip.BorderSizePixel = 0
+	quickStrip.ZIndex = 24
+	UiWidgets.AddCorner(quickStrip, 7)
+	UiWidgets.AddStroke(quickStrip, Theme.UI.Border, 1, 0.35)
+	quickStrip.Parent = self.root
+	self.quickStrip = quickStrip
+
+	local qsLayout = Instance.new("UIListLayout")
+	qsLayout.FillDirection = Enum.FillDirection.Horizontal
+	qsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	qsLayout.Padding = UDim.new(0, 4)
+	qsLayout.Parent = quickStrip
+	local qsPad = Instance.new("UIPadding")
+	qsPad.PaddingLeft = UDim.new(0, 5)
+	qsPad.PaddingRight = UDim.new(0, 5)
+	qsPad.Parent = quickStrip
+
+	local gearBtn = UiWidgets.MakeButton(quickStrip, "⚙️", Theme.UI.BgCard, UDim2.fromOffset(32, 22), nil)
+	gearBtn.TextSize = 11
+	gearBtn.ZIndex = 25
+	gearBtn.Activated:Connect(function()
+		SoundFX.Play("click")
+		self.canvas.altView = not self.canvas.altView
+		self.canvas:MarkAllDirty()
+	end)
+
+	for _, spSpec in ipairs({
+		{ label = "⏸", speed = 0 },
+		{ label = "1×", speed = 1 },
+		{ label = "2×", speed = 2 },
+		{ label = "4×", speed = 4 },
+	}) do
+		local sb = UiWidgets.MakeButton(quickStrip, spSpec.label, Theme.UI.BgCard, UDim2.fromOffset(38, 22), nil)
+		sb.TextSize = 11
+		sb.ZIndex = 25
+		local targetSpd = spSpec.speed
+		sb.Activated:Connect(function()
+			SoundFX.Play("click")
+			if targetSpd == 0 then
+				self.callbacks.onSendIntent("SimControl", { paused = true })
+			else
+				self.callbacks.onSendIntent("SimControl", { paused = false, speed = targetSpd })
+			end
+		end)
+	end
+
 	local miniDotsLayer = Instance.new("Frame")
 	miniDotsLayer.Position = UDim2.fromOffset(5, 5)
 	miniDotsLayer.Size = UDim2.new(1, -10, 1, -10)
@@ -630,9 +697,9 @@ function HudUI:_BuildMinimapAndFeed()
 		self.feedItems[i] = fb
 	end
 
-	-- Actionable Alerts Stack (Top-Left incoming Nuke Siren, Alliance Requests & Extension Prompts!)
+	-- Actionable Alerts Stack (Top-Left below QuickControlStrip — ZERO overlap!)
 	local alertsBox = Instance.new("Frame")
-	alertsBox.Position = UDim2.fromOffset(14, 14)
+	alertsBox.Position = UDim2.fromOffset(14, 52)
 	alertsBox.Size = UDim2.fromOffset(310, 210)
 	alertsBox.BackgroundTransparency = 1
 	alertsBox.ZIndex = 22
@@ -1517,12 +1584,26 @@ function HudUI:UpdateFromState(state: any, mySmallId: number)
 		end
 	end
 
-	-- 6. Minimap Preview + Player Territory Dots
-	if state.mapId ~= nil and state.mapId ~= self.lastMiniMapId then
-		self.lastMiniMapId = state.mapId
-		UiWidgets.PopulateMapPreview(self.miniMapPreview, MapRegistry.Get(state.mapId))
+	-- 6. Minimap Live EditableImage Texture + Continent Preview + Territory Dots
+	local liveMini = self.canvas:GetMinimapEditableImage()
+	if liveMini ~= nil then
+		if self.boundMiniObj ~= liveMini then
+			self.boundMiniObj = liveMini
+			pcall(function()
+				self.miniLiveImg.ImageContent = Content.fromObject(liveMini)
+			end)
+		end
+		self.miniLiveImg.Visible = true
+		self.miniMapPreview.Visible = false
+	else
+		self.miniLiveImg.Visible = false
+		self.miniMapPreview.Visible = true
+		if state.mapId ~= nil and state.mapId ~= self.lastMiniMapId then
+			self.lastMiniMapId = state.mapId
+			UiWidgets.PopulateMapPreview(self.miniMapPreview, MapRegistry.Get(state.mapId))
+		end
 	end
-	if self.canvas.map ~= nil then
+	if self.canvas.map ~= nil and liveMini == nil then
 		local mw, mh = self.canvas.map.width, self.canvas.map.height
 		local activeDotIds: { [number]: boolean } = {}
 		for _, p in ipairs(state.players or {}) do
@@ -1538,7 +1619,7 @@ function HudUI:UpdateFromState(state: any, mySmallId: number)
 					d.Parent = self.miniDotsLayer
 					self.miniDots[p.smallId] = d
 				end
-				local dotSz = math.clamp(math.sqrt(p.tilesOwned) * 0.22, 3, 14)
+				local dotSz = math.clamp(math.sqrt(p.tilesOwned) * 0.08, 3, 12)
 				d.Size = UDim2.fromOffset(dotSz, dotSz)
 				d.Position = UDim2.fromScale(p.labelX / mw, p.labelY / mh)
 				d.BackgroundColor3 = Theme.HexToColor3(p.colorHex)
@@ -1590,8 +1671,9 @@ function HudUI:SyncCanvasExclusions(inMenu: boolean)
 		if self.spawnBanner.Visible or self.armedPill.Visible then
 			rects[#rects + 1] = { vw * 0.5 - 245 * sc, 0, vw * 0.5 + 245 * sc, 78 * sc }
 		end
+		rects[#rects + 1] = { 0, 0, 250 * sc, 52 * sc }
 		if #self.alertsBox:GetChildren() > 1 then
-			rects[#rects + 1] = { 0, 0, 330 * sc, 150 * sc }
+			rects[#rects + 1] = { 0, 50 * sc, 330 * sc, 210 * sc }
 		end
 		if self.radialRoot.Visible then
 			local rx = self.radialRoot.Position.X.Offset * sc

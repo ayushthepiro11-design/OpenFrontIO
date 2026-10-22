@@ -1,9 +1,13 @@
+--!native
 --!strict
--- Pure 2D Browser-Exact OpenFront Renderer for Roblox:
---   Backend 1 (Primary): Native RGBA8 `EditableImage:WritePixelsBuffer` 1px WebGL-identical shader
---   Backend 2 (Auto Fallback): Pooled Per-Row RLE `ScanlineCanvas2D` (zero setup even in unpublished .rbxl!)
---   Plus crisp vector overlays for Structures, Ships, Trains, Railroads, Missiles, Blast Rings,
---   Maximal-Inscribed-Square Nation Labels, and Interactive Viewport Minimap!
+-- Pure 2D Full-Scale OpenFront Renderer (`MapCanvas.luau` — Multi-Atlas `EditableImage` Grid!)
+-- Supports ANY map dimension up to `4108x1948` (`8,002,384` pixels!) with zero seams & zero crashes:
+--   Backend 1 (Primary): Tiled `ceil(W / 1024) x ceil(H / 1024)` grid of `<= 1024x1024` `EditableImage`s
+--     with surgical per-tile dirty-row band `:WritePixelsBuffer` uploads + `:Destroy()` cleanup!
+--   Backend 2 (Auto Fallback): Multi-row adaptive opaque `Scanline2D` (`BackgroundTransparency == 0`,
+--     automatically downsamples vertical step on `1000..4108px` maps so instance count stays fast & crisp!)
+--   Plus live `220x110` `MinimapEditableImage`, smooth Nation Label interpolation, exact `Config` range rings,
+--   and strict zero-overlap AABB placement!
 
 local AssetService = game:GetService("AssetService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -16,6 +20,22 @@ local MapRegistry = require(Shared:WaitForChild("Maps"):WaitForChild("MapRegistr
 local Theme = require(Shared:WaitForChild("Theme"))
 
 local UiWidgets = require(script.Parent:WaitForChild("UiWidgets"))
+
+local TILE_MAX = 1024
+local MINI_W = 220
+local MINI_H = 110
+
+type AtlasTile = {
+	gx: number,
+	gy: number,
+	tx0: number,
+	ty0: number,
+	tw: number,
+	th: number,
+	imgLabel: ImageLabel,
+	editImg: any,
+	uploadBuf: buffer,
+}
 
 local MapCanvas = {}
 MapCanvas.__index = MapCanvas
@@ -58,8 +78,8 @@ function MapCanvas.new(viewportParent: Frame, camera: any): CanvasInstance
 	self.armedBuildType = nil :: string?
 	self.cursorTileX = 0
 	self.cursorTileY = 0
+	self.scanStep = 1
 
-	-- Fast per-smallId color LUTs
 	self.pR = {} :: { [number]: number }
 	self.pG = {} :: { [number]: number }
 	self.pB = {} :: { [number]: number }
@@ -75,7 +95,6 @@ function MapCanvas.new(viewportParent: Frame, camera: any): CanvasInstance
 	self.hudBlockedRects = {} :: { { number } }
 	self.hideWorldLabels = false
 
-	-- Surface container transformed by Camera2D
 	local mapRoot = Instance.new("Frame")
 	mapRoot.Name = "MapSurface"
 	mapRoot.BackgroundColor3 = Color3.fromRGB(63, 125, 173)
@@ -94,18 +113,16 @@ function MapCanvas.new(viewportParent: Frame, camera: any): CanvasInstance
 	scanTerritoryLayer.Parent = mapRoot
 	self.scanTerritoryLayer = scanTerritoryLayer
 
-	local pixelImageLabel = Instance.new("ImageLabel")
-	pixelImageLabel.Name = "EditableMapImage"
-	pixelImageLabel.Size = UDim2.fromScale(1, 1)
-	pixelImageLabel.BackgroundTransparency = 1
-	pixelImageLabel.BorderSizePixel = 0
-	pixelImageLabel.ResampleMode = Enum.ResamplerMode.Pixelated
-	pixelImageLabel.Visible = false
-	pixelImageLabel.ZIndex = 2
-	pixelImageLabel.Parent = mapRoot
-	self.pixelImageLabel = pixelImageLabel
+	local atlasFolder = Instance.new("Frame")
+	atlasFolder.Name = "EditableAtlasGrid"
+	atlasFolder.Size = UDim2.fromScale(1, 1)
+	atlasFolder.BackgroundTransparency = 1
+	atlasFolder.BorderSizePixel = 0
+	atlasFolder.Visible = false
+	atlasFolder.ZIndex = 2
+	atlasFolder.Parent = mapRoot
+	self.atlasFolder = atlasFolder
 
-	-- Screen-space crisp vector overlay container (never blurs at high zoom!)
 	local overlayRoot = Instance.new("Frame")
 	overlayRoot.Name = "WorldVectorOverlay"
 	overlayRoot.Size = UDim2.fromScale(1, 1)
@@ -115,7 +132,6 @@ function MapCanvas.new(viewportParent: Frame, camera: any): CanvasInstance
 	overlayRoot.Parent = viewportParent
 	self.overlayRoot = overlayRoot
 
-	-- Cursor build preview ring
 	local cursorRing = Instance.new("Frame")
 	cursorRing.Name = "BuildCursorPreview"
 	cursorRing.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -128,7 +144,6 @@ function MapCanvas.new(viewportParent: Frame, camera: any): CanvasInstance
 	cursorRing.Parent = overlayRoot
 	self.cursorRing = cursorRing
 
-	-- Object pools
 	self.scanFramePool = {} :: { Frame }
 	self.rowFrames = {} :: { [number]: { Frame } }
 	self.dirtyRows = {} :: { [number]: boolean }
@@ -142,10 +157,42 @@ function MapCanvas.new(viewportParent: Frame, camera: any): CanvasInstance
 	self.shockwaves = {} :: { { frame: Frame, x: number, y: number, maxR: number, t: number } }
 	self.spawnMarkers = {} :: { [number]: Frame }
 
-	self.editableImage = nil :: EditableImage?
+	self.atlasTiles = {} :: { AtlasTile }
+	self.atlasCols = 0
+	self.atlasRows = 0
+	self.miniEditImg = nil :: any
+	self.miniPixelBuf = buffer.create(MINI_W * MINI_H * 4)
+	self.minimapDirty = true
 	self.pixelBuf = nil :: buffer?
 
 	return self
+end
+
+function MapCanvas:_DestroyAtlas()
+	for _, tile in ipairs(self.atlasTiles) do
+		if tile.editImg ~= nil then
+			pcall(function()
+				tile.editImg:Destroy()
+			end)
+			tile.editImg = nil
+		end
+		if tile.imgLabel ~= nil then
+			tile.imgLabel:Destroy()
+		end
+	end
+	table.clear(self.atlasTiles)
+	self.atlasCols = 0
+	self.atlasRows = 0
+	if self.miniEditImg ~= nil then
+		pcall(function()
+			self.miniEditImg:Destroy()
+		end)
+		self.miniEditImg = nil
+	end
+end
+
+function MapCanvas:GetMinimapEditableImage(): any
+	return self.miniEditImg
 end
 
 function MapCanvas:_AllocScanFrame(parent: Instance): Frame
@@ -163,8 +210,8 @@ function MapCanvas:_AllocScanFrame(parent: Instance): Frame
 	return f
 end
 
-function MapCanvas:_RecycleRowFrames(y: number)
-	local list = self.rowFrames[y]
+function MapCanvas:_RecycleRowFrames(bandY: number)
+	local list = self.rowFrames[bandY]
 	if list ~= nil then
 		for i = #list, 1, -1 do
 			local f = list[i]
@@ -176,13 +223,15 @@ function MapCanvas:_RecycleRowFrames(y: number)
 end
 
 function MapCanvas:LoadMap(mapId: string)
+	self:_DestroyAtlas()
+
 	local rawDef = MapRegistry.Get(mapId)
 	local decoded = MapCodec.DecodeMap(rawDef)
 	self.rawMap = rawDef
 	self.map = decoded
+	self.scanStep = math.max(1, math.ceil(decoded.height / 240))
 	self.camera:SetMapSize(decoded.width, decoded.height)
 
-	-- Clear previous visual pools
 	for y, _ in pairs(self.rowFrames) do
 		self:_RecycleRowFrames(y)
 	end
@@ -203,57 +252,130 @@ function MapCanvas:LoadMap(mapId: string)
 		nr:Destroy()
 	end
 	table.clear(self.nukeRings)
+	for _, sw in ipairs(self.shockwaves) do
+		sw.frame:Destroy()
+	end
+	table.clear(self.shockwaves)
 	for _, sm in pairs(self.spawnMarkers) do
 		sm:Destroy()
 	end
 	table.clear(self.spawnMarkers)
 
-	-- Attempt Primary Engine: Native RGBA8 EditableImage!
-	self.editableImage = nil
+	-- Primary Backend: Seamless 2D Grid of `<= 1024x1024` EditableImage Atlas Tiles!
 	self.usingEditableImage = false
 	if not self.forceScanline then
-		local ok, imgOrErr = pcall(function()
-			local img = AssetService:CreateEditableImage({
-				Size = Vector2.new(decoded.width, decoded.height),
-			})
-			self.pixelImageLabel.ImageContent = Content.fromObject(img)
-			return img
-		end)
-		if ok and imgOrErr ~= nil then
-			self.editableImage = imgOrErr
+		local cols = math.ceil(decoded.width / TILE_MAX)
+		local rows = math.ceil(decoded.height / TILE_MAX)
+		local okAll = true
+
+		for gy = 1, rows do
+			local ty0 = (gy - 1) * TILE_MAX
+			local th = math.min(TILE_MAX, decoded.height - ty0)
+			for gx = 1, cols do
+				local tx0 = (gx - 1) * TILE_MAX
+				local tw = math.min(TILE_MAX, decoded.width - tx0)
+
+				local ok, editImg = pcall(function()
+					return AssetService:CreateEditableImage({
+						Size = Vector2.new(tw, th),
+					})
+				end)
+				if not ok or editImg == nil then
+					okAll = false
+					break
+				end
+
+				local imgLabel = Instance.new("ImageLabel")
+				imgLabel.Name = string.format("AtlasTile_%d_%d", gx, gy)
+				imgLabel.Position = UDim2.fromScale(tx0 / decoded.width, ty0 / decoded.height)
+				imgLabel.Size = UDim2.fromScale(tw / decoded.width, th / decoded.height)
+				imgLabel.BackgroundTransparency = 1
+				imgLabel.BorderSizePixel = 0
+				imgLabel.ResampleMode = Enum.ResamplerMode.Pixelated
+				imgLabel.ZIndex = 2
+				imgLabel.Parent = self.atlasFolder
+
+				local okContent = pcall(function()
+					imgLabel.ImageContent = Content.fromObject(editImg)
+				end)
+				if not okContent then
+					imgLabel:Destroy()
+					pcall(function()
+						editImg:Destroy()
+					end)
+					okAll = false
+					break
+				end
+
+				table.insert(self.atlasTiles, {
+					gx = gx,
+					gy = gy,
+					tx0 = tx0,
+					ty0 = ty0,
+					tw = tw,
+					th = th,
+					imgLabel = imgLabel,
+					editImg = editImg,
+					uploadBuf = buffer.create(tw * th * 4),
+				})
+			end
+			if not okAll then
+				break
+			end
+		end
+
+		if okAll and #self.atlasTiles > 0 then
+			self.atlasCols = cols
+			self.atlasRows = rows
 			self.pixelBuf = buffer.create(decoded.size * 4)
 			self.usingEditableImage = true
-			self.pixelImageLabel.Visible = true
+			self.atlasFolder.Visible = true
+
+			local okMini, miniImg = pcall(function()
+				return AssetService:CreateEditableImage({
+					Size = Vector2.new(MINI_W, MINI_H),
+				})
+			end)
+			if okMini and miniImg ~= nil then
+				self.miniEditImg = miniImg
+			end
+		else
+			self:_DestroyAtlas()
 		end
 	end
 
 	if not self.usingEditableImage then
-		self.pixelImageLabel.Visible = false
+		self.atlasFolder.Visible = false
 		self:_BuildStaticScanlineTerrain()
 	end
 
 	self:MarkAllDirty()
 end
 
+-- Adaptive multi-row opaque ScanlineTerrain (`<= ~12,000` frames even on `4108x1948` GiantWorldMap!)
 function MapCanvas:_BuildStaticScanlineTerrain()
 	local map = self.map
 	if map == nil then
 		return
 	end
 	local w, h = map.width, map.height
+	local stepY = self.scanStep
+	local stepX = math.max(1, math.ceil(w / 500))
 	local terrainBuf = map.terrain
-	local rowH = 1 / h
 
-	for y = 0, h - 1 do
+	local y = 0
+	while y < h do
+		local nextY = math.min(h, y + stepY)
+		local rowH = (nextY - y) / h
 		local rowOff = y * w
 		local x = 0
 		while x < w do
 			local tb = buffer.readu8(terrainBuf, rowOff + x)
-			local run = 1
+			local run = stepX
 			while x + run < w and buffer.readu8(terrainBuf, rowOff + x + run) == tb do
-				run += 1
+				run += stepX
 			end
-			-- Deep open ocean matches `mapRoot.BackgroundColor3`, so skip pure deep water runs!
+			local endX = math.min(w, x + run)
 			local isLand = bit32.band(tb, 0x80) ~= 0
 			local isShore = bit32.band(tb, 0x40) ~= 0
 			if isLand or isShore then
@@ -262,12 +384,13 @@ function MapCanvas:_BuildStaticScanlineTerrain()
 				seg.BackgroundTransparency = 0
 				seg.BackgroundColor3 = Theme.TerrainColor3LUT[tb + 1]
 				seg.Position = UDim2.fromScale(x / w, y / h)
-				seg.Size = UDim2.fromScale(run / w + 0.0005, rowH + 0.0008)
+				seg.Size = UDim2.fromScale((endX - x) / w + 0.0005, rowH + 0.0008)
 				seg.ZIndex = 1
 				seg.Parent = self.scanTerrainLayer
 			end
-			x += run
+			x = endX
 		end
+		y = nextY
 	end
 end
 
@@ -277,6 +400,7 @@ function MapCanvas:MarkAllDirty()
 		return
 	end
 	self.fullDirty = true
+	self.minimapDirty = true
 	for y = 0, map.height - 1 do
 		self.dirtyRows[y] = true
 	end
@@ -288,7 +412,6 @@ function MapCanvas:SetPreferScanline(prefer: boolean)
 	end
 	self.forceScanline = prefer
 	if self.rawMap ~= nil then
-		-- Preserve current map ownership & fallout across live renderer switch!
 		local prevMap = self.map
 		self:LoadMap(self.rawMap.id)
 		if prevMap ~= nil and self.map ~= nil and prevMap.size == self.map.size then
@@ -299,7 +422,7 @@ function MapCanvas:SetPreferScanline(prefer: boolean)
 	end
 end
 
-function MapCanvas:UpdatePalettes(players: { any }, mySmallId: number, units: { any }?)
+function MapCanvas:UpdatePalettes(players: { any }, mySmallId: number, _units: { any }?)
 	self.mySmallId = mySmallId
 	table.clear(self.friendlySet)
 	table.clear(self.embargoSet)
@@ -349,7 +472,6 @@ function MapCanvas:UpdatePalettes(players: { any }, mySmallId: number, units: { 
 	end
 end
 
--- Exact pixel shader evaluation for a single tile `ref`!
 function MapCanvas:_ComputePixelU32(map: MapCodec.GameMap, ref: number): number
 	local tb = buffer.readu8(map.terrain, ref)
 	if self.terrainOnly then
@@ -367,12 +489,14 @@ function MapCanvas:_ComputePixelU32(map: MapCodec.GameMap, ref: number): number
 
 	local w = map.width
 	local x = ref % w
-	local isBorder = (x == 0)
-		or (x == w - 1)
+	local leftRef = if x > 0 then ref - 1 elseif map.wrapX then ref + (w - 1) else -1
+	local rightRef = if x < w - 1 then ref + 1 elseif map.wrapX then ref - (w - 1) else -1
+	local isBorder = (leftRef < 0)
+		or (rightRef < 0)
 		or (ref < w)
 		or (ref >= map.size - w)
-		or (buffer.readu16(map.owner, (ref - 1) * 2) ~= oid)
-		or (buffer.readu16(map.owner, (ref + 1) * 2) ~= oid)
+		or (buffer.readu16(map.owner, leftRef * 2) ~= oid)
+		or (buffer.readu16(map.owner, rightRef * 2) ~= oid)
 		or (buffer.readu16(map.owner, (ref - w) * 2) ~= oid)
 		or (buffer.readu16(map.owner, (ref + w) * 2) ~= oid)
 
@@ -413,21 +537,84 @@ function MapCanvas:_ComputePixelU32(map: MapCodec.GameMap, ref: number): number
 	return Theme.PackRGBA(fr, fg, fb, 255)
 end
 
+function MapCanvas:_UploadDirtyAtlasTiles(w: number, h: number, pbuf: buffer, isFull: boolean)
+	local dirtyRows = self.dirtyRows
+	for _, tile in ipairs(self.atlasTiles) do
+		local ty0 = tile.ty0
+		local th = tile.th
+		local tw = tile.tw
+		local tx0 = tile.tx0
+		local dMin = th
+		local dMax = -1
+		if isFull then
+			dMin = 0
+			dMax = th - 1
+		else
+			for ly = 0, th - 1 do
+				if dirtyRows[ty0 + ly] then
+					if ly < dMin then
+						dMin = ly
+					end
+					if ly > dMax then
+						dMax = ly
+					end
+				end
+			end
+		end
+
+		if dMin <= dMax then
+			local spanRows = dMax - dMin + 1
+			local rowBytes = tw * 4
+			local uploadBuf = if spanRows == th then tile.uploadBuf else buffer.create(spanRows * rowBytes)
+			for r = 0, spanRows - 1 do
+				buffer.copy(uploadBuf, r * rowBytes, pbuf, ((ty0 + dMin + r) * w + tx0) * 4, rowBytes)
+			end
+			tile.editImg:WritePixelsBuffer(Vector2.new(0, dMin), Vector2.new(tw, spanRows), uploadBuf)
+		end
+	end
+
+	-- Update downsampled `220x110` live Minimap EditableImage!
+	if self.miniEditImg ~= nil then
+		local mBuf = self.miniPixelBuf
+		for my = 0, MINI_H - 1 do
+			local sy = math.min(h - 1, math.floor((my + 0.5) * h / MINI_H))
+			local srcRow = sy * w
+			local dstRow = my * MINI_W
+			for mx = 0, MINI_W - 1 do
+				local sx = math.min(w - 1, math.floor((mx + 0.5) * w / MINI_W))
+				buffer.writeu32(mBuf, (dstRow + mx) * 4, buffer.readu32(pbuf, (srcRow + sx) * 4))
+			end
+		end
+		self.miniEditImg:WritePixelsBuffer(Vector2.zero, Vector2.new(MINI_W, MINI_H), mBuf)
+	end
+end
+
 function MapCanvas:_FlushEditableImage()
 	local map = self.map
-	local img = self.editableImage
 	local pbuf = self.pixelBuf
-	if map == nil or img == nil or pbuf == nil then
+	if map == nil or #self.atlasTiles == 0 or pbuf == nil then
 		return
 	end
 
+	local w = map.width
+	local h = map.height
 	if self.fullDirty then
 		self.fullDirty = false
 		table.clear(self.dirtyTiles)
+		local terrainBuf = map.terrain
+		local ownerBuf = map.owner
+		local falloutBuf = map.fallout
+		local terrainLUT = Theme.TerrainU32LUT
+		local tOnly = self.terrainOnly
 		for ref = 0, map.size - 1 do
-			buffer.writeu32(pbuf, ref * 4, self:_ComputePixelU32(map, ref))
+			if tOnly or (buffer.readu16(ownerBuf, ref * 2) == 0 and buffer.readu8(falloutBuf, ref) == 0) then
+				buffer.writeu32(pbuf, ref * 4, terrainLUT[buffer.readu8(terrainBuf, ref) + 1])
+			else
+				buffer.writeu32(pbuf, ref * 4, self:_ComputePixelU32(map, ref))
+			end
 		end
-		img:WritePixelsBuffer(Vector2.zero, Vector2.new(map.width, map.height), pbuf)
+		self:_UploadDirtyAtlasTiles(w, h, pbuf, true)
+		table.clear(self.dirtyRows)
 		return
 	end
 
@@ -436,18 +623,21 @@ function MapCanvas:_FlushEditableImage()
 		return
 	end
 
-	local w = map.width
 	local total = map.size
 	for i = 1, nDirty do
 		local ref = self.dirtyTiles[i]
 		if ref >= 0 and ref < total then
 			buffer.writeu32(pbuf, ref * 4, self:_ComputePixelU32(map, ref))
-			-- Refresh 4 cardinal neighbors so borders stay 100% single-pixel exact!
-			if ref % w > 0 then
+			local x = ref % w
+			if x > 0 then
 				buffer.writeu32(pbuf, (ref - 1) * 4, self:_ComputePixelU32(map, ref - 1))
+			elseif map.wrapX then
+				buffer.writeu32(pbuf, (ref + w - 1) * 4, self:_ComputePixelU32(map, ref + w - 1))
 			end
-			if ref % w < w - 1 then
+			if x < w - 1 then
 				buffer.writeu32(pbuf, (ref + 1) * 4, self:_ComputePixelU32(map, ref + 1))
+			elseif map.wrapX then
+				buffer.writeu32(pbuf, (ref - w + 1) * 4, self:_ComputePixelU32(map, ref - w + 1))
 			end
 			if ref >= w then
 				buffer.writeu32(pbuf, (ref - w) * 4, self:_ComputePixelU32(map, ref - w))
@@ -458,109 +648,116 @@ function MapCanvas:_FlushEditableImage()
 		end
 	end
 	table.clear(self.dirtyTiles)
-	img:WritePixelsBuffer(Vector2.zero, Vector2.new(map.width, map.height), pbuf)
+	self:_UploadDirtyAtlasTiles(w, h, pbuf, false)
+	table.clear(self.dirtyRows)
 end
 
--- Per-row RLE Scanline fallback flush (updates ONLY modified rows in < 0.2ms!)
+-- Adaptive Multi-Row Opaque Scanline2D Territory Renderer (`BackgroundTransparency == 0`)
 function MapCanvas:_FlushScanlineRows()
 	local map = self.map
 	if map == nil then
 		return
 	end
 	local w, h = map.width, map.height
+	local stepY = self.scanStep
 	local ownerBuf = map.owner
 	local falloutBuf = map.fallout
-	local rowH = 1 / h
+	local dirtyBands: { [number]: boolean } = {}
+	for rawY, isDirty in pairs(self.dirtyRows) do
+		if isDirty and rawY >= 0 and rawY < h then
+			dirtyBands[math.floor(rawY / stepY) * stepY] = true
+		end
+	end
 
-	for y, isDirty in pairs(self.dirtyRows) do
-		if isDirty and y >= 0 and y < h then
-			self:_RecycleRowFrames(y)
-			if not self.terrainOnly then
-				local list = self.rowFrames[y]
-				if list == nil then
-					list = {}
-					self.rowFrames[y] = list
+	for y, _ in pairs(dirtyBands) do
+		self:_RecycleRowFrames(y)
+		if not self.terrainOnly then
+			local list = self.rowFrames[y]
+			if list == nil then
+				list = {}
+				self.rowFrames[y] = list
+			end
+			local nextY = math.min(h, y + stepY)
+			local rowH = (nextY - y) / h
+			local rowOff = y * w
+			local x = 0
+			while x < w do
+				local ref = rowOff + x
+				local hasF = buffer.readu8(falloutBuf, ref) ~= 0
+				local oid = buffer.readu16(ownerBuf, ref * 2)
+				if not hasF and oid == 0 then
+					x += 1
+					continue
 				end
-				local rowOff = y * w
-				local x = 0
-				while x < w do
-					local ref = rowOff + x
-					local hasF = buffer.readu8(falloutBuf, ref) ~= 0
-					local oid = buffer.readu16(ownerBuf, ref * 2)
-					if not hasF and oid == 0 then
-						x += 1
-						continue
-					end
 
-					local isBorder = false
-					if not hasF and oid > 0 then
-						isBorder = (x == 0)
-							or (x == w - 1)
+				local isBorder = false
+				if not hasF and oid > 0 then
+					isBorder = (x == 0)
+						or (x == w - 1)
+						or (y == 0)
+						or (y >= h - stepY)
+						or (buffer.readu16(ownerBuf, (ref - 1) * 2) ~= oid)
+						or (buffer.readu16(ownerBuf, (ref + 1) * 2) ~= oid)
+						or (buffer.readu16(ownerBuf, (ref - w) * 2) ~= oid)
+						or (y + stepY < h and buffer.readu16(ownerBuf, (ref + stepY * w) * 2) ~= oid)
+				end
+
+				local run = 1
+				while x + run < w do
+					local nRef = rowOff + x + run
+					local nf = buffer.readu8(falloutBuf, nRef) ~= 0
+					local noid = buffer.readu16(ownerBuf, nRef * 2)
+					if nf ~= hasF or noid ~= oid then
+						break
+					end
+					if not hasF then
+						local nb = (x + run == w - 1)
 							or (y == 0)
-							or (y == h - 1)
-							or (buffer.readu16(ownerBuf, (ref - 1) * 2) ~= oid)
-							or (buffer.readu16(ownerBuf, (ref + 1) * 2) ~= oid)
-							or (buffer.readu16(ownerBuf, (ref - w) * 2) ~= oid)
-							or (buffer.readu16(ownerBuf, (ref + w) * 2) ~= oid)
-					end
-
-					local run = 1
-					while x + run < w do
-						local nRef = rowOff + x + run
-						local nf = buffer.readu8(falloutBuf, nRef) ~= 0
-						local noid = buffer.readu16(ownerBuf, nRef * 2)
-						if nf ~= hasF or noid ~= oid then
+							or (y >= h - stepY)
+							or (buffer.readu16(ownerBuf, (nRef - 1) * 2) ~= oid)
+							or (buffer.readu16(ownerBuf, (nRef + 1) * 2) ~= oid)
+							or (buffer.readu16(ownerBuf, (nRef - w) * 2) ~= oid)
+							or (y + stepY < h and buffer.readu16(ownerBuf, (nRef + stepY * w) * 2) ~= oid)
+						if nb ~= isBorder then
 							break
 						end
-						if not hasF then
-							local nb = (x + run == w - 1)
-								or (y == 0)
-								or (y == h - 1)
-								or (buffer.readu16(ownerBuf, (nRef - 1) * 2) ~= oid)
-								or (buffer.readu16(ownerBuf, (nRef + 1) * 2) ~= oid)
-								or (buffer.readu16(ownerBuf, (nRef - w) * 2) ~= oid)
-								or (buffer.readu16(ownerBuf, (nRef + w) * 2) ~= oid)
-							if nb ~= isBorder then
-								break
-							end
-						end
-						run += 1
 					end
-
-					local seg = self:_AllocScanFrame(self.scanTerritoryLayer)
-					seg.Position = UDim2.fromScale(x / w, y / h)
-					-- Zero transparency (100% opaque pre-blended RGB!) prevents ANY alpha stripe/overlap bleeding!
-					seg.BackgroundTransparency = 0
-					if hasF then
-						seg.Size = UDim2.fromScale(run / w + 0.0005, rowH + 0.0008)
-						seg.ZIndex = 4
-						seg.BackgroundColor3 = Theme.FalloutColor3
-					elseif self.altView then
-						seg.Size = UDim2.fromScale(run / w + 0.0005, rowH + 0.0008)
-						seg.ZIndex = if isBorder then 4 else 3
-						if oid == self.mySmallId then
-							seg.BackgroundColor3 = if isBorder then Color3.fromRGB(16, 112, 48) else Theme.Affiliation.SelfFill
-						elseif self.friendlySet[oid] then
-							seg.BackgroundColor3 = if isBorder then Color3.fromRGB(161, 98, 7) else Theme.Affiliation.AllyFill
-						else
-							seg.BackgroundColor3 = if isBorder then Color3.fromRGB(153, 27, 27) else Theme.Affiliation.EnemyFill
-						end
-					elseif isBorder then
-						seg.Size = UDim2.fromScale(run / w + 0.0004, rowH + 0.0006)
-						seg.ZIndex = 4
-						seg.BackgroundColor3 = self.borderColor3[oid] or Color3.fromRGB(45, 55, 72)
-					else
-						seg.Size = UDim2.fromScale(run / w + 0.0006, rowH + 0.0009)
-						seg.ZIndex = 3
-						seg.BackgroundColor3 = self.blendedFillColor3[oid] or self.fillColor3[oid] or Color3.fromRGB(180, 180, 180)
-					end
-					list[#list + 1] = seg
-					x += run
+					run += 1
 				end
+
+				local seg = self:_AllocScanFrame(self.scanTerritoryLayer)
+				seg.Position = UDim2.fromScale(x / w, y / h)
+				seg.BackgroundTransparency = 0
+				if hasF then
+					seg.Size = UDim2.fromScale(run / w + 0.0005, rowH + 0.0008)
+					seg.ZIndex = 4
+					seg.BackgroundColor3 = Theme.FalloutColor3
+				elseif self.altView then
+					seg.Size = UDim2.fromScale(run / w + 0.0005, rowH + 0.0008)
+					seg.ZIndex = if isBorder then 4 else 3
+					if oid == self.mySmallId then
+						seg.BackgroundColor3 = if isBorder then Color3.fromRGB(16, 112, 48) else Theme.Affiliation.SelfFill
+					elseif self.friendlySet[oid] then
+						seg.BackgroundColor3 = if isBorder then Color3.fromRGB(161, 98, 7) else Theme.Affiliation.AllyFill
+					else
+						seg.BackgroundColor3 = if isBorder then Color3.fromRGB(153, 27, 27) else Theme.Affiliation.EnemyFill
+					end
+				elseif isBorder then
+					seg.Size = UDim2.fromScale(run / w + 0.0004, rowH + 0.0006)
+					seg.ZIndex = 4
+					seg.BackgroundColor3 = self.borderColor3[oid] or Color3.fromRGB(45, 55, 72)
+				else
+					seg.Size = UDim2.fromScale(run / w + 0.0006, rowH + 0.0009)
+					seg.ZIndex = 3
+					seg.BackgroundColor3 = self.blendedFillColor3[oid] or self.fillColor3[oid] or Color3.fromRGB(180, 180, 180)
+				end
+				list[#list + 1] = seg
+				x += run
 			end
 		end
 	end
 	table.clear(self.dirtyRows)
+	table.clear(self.dirtyTiles)
 	self.fullDirty = false
 end
 
@@ -617,21 +814,18 @@ function MapCanvas:SetRailEdges(railEdges: { { number } }?)
 	end
 end
 
--- Runs every RenderStepped (60 FPS) to position canvas, icons, rings, shockwaves & territory labels smoothly!
 function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 	local map = self.map
 	if map == nil then
 		return
 	end
 
-	-- 1. Flush dirty pixels or scanline rows
 	if self.usingEditableImage then
 		self:_FlushEditableImage()
 	else
 		self:_FlushScanlineRows()
 	end
 
-	-- 2. Apply Camera2D viewport transform to MapSurface
 	local leftPx, topPx, widthPx, heightPx = self.camera:GetCanvasRect()
 	self.mapRoot.Position = UDim2.fromOffset(leftPx, topPx)
 	self.mapRoot.Size = UDim2.fromOffset(widthPx, heightPx)
@@ -639,14 +833,16 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 	local scale = self.camera.scale
 	local viewW, viewH = self.camera.viewW, self.camera.viewH
 
-	-- 3. Armed build cursor preview ring
+	-- Exact Server-Matched Build Cursor Preview Ring!
 	if self.armedBuildType ~= nil then
 		local sx, sy = self.camera:WorldToScreen(self.cursorTileX + 0.5, self.cursorTileY + 0.5)
-		local rTiles = 6
+		local rTiles = 10
 		if self.armedBuildType == "DefensePost" then
-			rTiles = Config.DEFENSE_POST_RANGE
+			rTiles = Config.DefensePostRangeScaled(map.width)
 		elseif self.armedBuildType == "SAMLauncher" then
-			rTiles = Config.SamRange(1) * math.clamp(map.width / 700, 0.55, 1.0)
+			rTiles = Config.SamRangeScaled(1, map.width)
+		elseif self.armedBuildType == "Warship" then
+			rTiles = Config.WarshipRangeScaled(map.width)
 		elseif self.armedBuildType == "AtomBomb" then
 			local _, outer = Config.NukeRadii("AtomBomb", map.width)
 			rTiles = outer
@@ -654,7 +850,7 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 			local _, outer = Config.NukeRadii("HydrogenBomb", map.width)
 			rTiles = outer
 		elseif self.armedBuildType == "MIRV" then
-			rTiles = 48
+			rTiles = 65 * Config.MapScaleFactor(map.width)
 		end
 		local diamPx = math.max(18, rTiles * 2 * scale)
 		self.cursorRing.Size = UDim2.fromOffset(diamPx, diamPx)
@@ -668,12 +864,12 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 		return
 	end
 
-	-- 4. Spawn Phase Markers
+	-- Spawn Phase Beacons
 	local inSpawn = stateSnapshot.inSpawnPhase == true
 	local seenSpawn: { [number]: boolean } = {}
 	if inSpawn then
 		for _, p in ipairs(stateSnapshot.players or {}) do
-			if p.spawnX >= 0 and p.spawnY >= 0 and (p.playerType ~= "Bot" or scale > 3.5) then
+			if p.spawnX >= 0 and p.spawnY >= 0 and (p.playerType ~= "Bot" or scale > 1.5) then
 				seenSpawn[p.smallId] = true
 				local sm = self.spawnMarkers[p.smallId]
 				if sm == nil then
@@ -703,7 +899,6 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 		end
 	end
 
-	-- Helper for strict screen-space bounding-box non-overlap (with margin pad)
 	local placedRects: { { number } } = {}
 	for _, hr in ipairs(self.hudBlockedRects) do
 		placedRects[#placedRects + 1] = hr
@@ -721,16 +916,15 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 		return false
 	end
 
-	-- 5. Dynamic Nation & Player Labels FIRST (sorted by empire size so big empires win & never overlap!)
-	-- Pre-register on-screen unit circle footprints so Country Name Plates float cleanly around capital clusters!
 	for _, u in ipairs(stateSnapshot.units or {}) do
 		local ux, uy = self.camera:WorldToScreen(u.x + 0.5, u.y + 0.5)
 		if ux > -24 and ux < viewW + 24 and uy > -24 and uy < viewH + 24 then
-			local hr = math.clamp(scale * 1.6, 7, 13)
+			local hr = math.clamp(scale * 2.2, 8, 13)
 			placedRects[#placedRects + 1] = { ux - hr, uy - hr, ux + hr, uy + hr }
 		end
 	end
 
+	-- Dynamic Smooth-Gliding Country Name Plates (`Label_<smallId>`, strictly zero screen-space AABB overlaps!)
 	local activeLabelIds: { [number]: boolean } = {}
 	if self.showNames and not inSpawn and not self.terrainOnly and not self.hideWorldLabels then
 		local candidates = {}
@@ -748,11 +942,21 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 
 		local nudges = { 0, -24, 24, -44, 44 }
 		for _, p in ipairs(candidates) do
-			local boxPx = (p.labelSpan or 4) * scale
+			local lw = self.labelWidgets[p.smallId]
+			if lw ~= nil then
+				lw.smoothX = lw.smoothX + (p.labelX - lw.smoothX) * 0.28
+				lw.smoothY = lw.smoothY + (p.labelY - lw.smoothY) * 0.28
+				lw.smoothSpan = lw.smoothSpan + ((p.labelSpan or 8) - lw.smoothSpan) * 0.28
+			end
+			local curSpan = if lw then lw.smoothSpan else (p.labelSpan or 8)
+			local curX = if lw then lw.smoothX else p.labelX
+			local curY = if lw then lw.smoothY else p.labelY
+
+			local boxPx = math.max(curSpan, math.sqrt(p.tilesOwned) * 0.85) * scale
 			local isMe = p.smallId == self.mySmallId
-			if isMe or boxPx >= 34 then
-				local sx, sy = self.camera:WorldToScreen(p.labelX + 0.5, p.labelY + 0.5)
-				local fontPx = math.clamp(math.floor(boxPx * 0.20), 10, 15)
+			if isMe or boxPx >= 32 then
+				local sx, sy = self.camera:WorldToScreen(curX + 0.5, curY + 0.5)
+				local fontPx = math.clamp(math.floor(boxPx * 0.18), 10, 15)
 				local statusPrefix = ""
 				if p.emoji ~= nil and p.emoji ~= "" then
 					statusPrefix = p.emoji .. " "
@@ -761,7 +965,7 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 				end
 				local fullName = statusPrefix .. p.name
 				local hasFlag = p.flag ~= nil and p.flag ~= ""
-				local estW = math.clamp(math.ceil(#fullName * fontPx * 0.58) + (if hasFlag then 22 else 10), 54, 168)
+				local estW = math.clamp(math.ceil(#fullName * fontPx * 0.58) + (if hasFlag then 22 else 10), 54, 172)
 				local estH = fontPx * 2 + 6
 
 				local chosenY: number? = nil
@@ -778,9 +982,9 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 
 				if chosenY ~= nil then
 					activeLabelIds[p.smallId] = true
-					local lw = self.labelWidgets[p.smallId]
 					if lw == nil then
 						local container = Instance.new("Frame")
+						container.Name = "Label_" .. tostring(p.smallId)
 						container.AnchorPoint = Vector2.new(0.5, 0.5)
 						container.BackgroundColor3 = Color3.fromRGB(11, 17, 30)
 						container.BackgroundTransparency = 0.42
@@ -826,7 +1030,14 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 						troopLbl.Parent = container
 
 						container.Parent = self.overlayRoot
-						lw = { root = container, nameLbl = nameLbl, troopLbl = troopLbl }
+						lw = {
+							root = container,
+							nameLbl = nameLbl,
+							troopLbl = troopLbl,
+							smoothX = p.labelX,
+							smoothY = p.labelY,
+							smoothSpan = p.labelSpan or 8,
+						}
 						self.labelWidgets[p.smallId] = lw
 					end
 
@@ -848,7 +1059,7 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 		end
 	end
 
-	-- 6. Structures, Ships, Trains, Nuclear Missiles & Non-Overlapping Unit Badges!
+	-- Structures, Ships, Trains & Missiles
 	local activeUnitIds: { [number]: boolean } = {}
 	local activeNukeRings: { [number]: boolean } = {}
 
@@ -860,6 +1071,7 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 		local wObj = self.unitWidgets[u.id]
 		if wObj == nil then
 			local holder = Instance.new("Frame")
+			holder.Name = "Unit_" .. tostring(u.id)
 			holder.AnchorPoint = Vector2.new(0.5, 0.5)
 			holder.BackgroundColor3 = Color3.fromRGB(15, 23, 42)
 			holder.BackgroundTransparency = 0.15
@@ -917,18 +1129,18 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 
 		wObj.root.Visible = onScreen and not self.terrainOnly
 		if onScreen and not self.terrainOnly then
-			local basePx = math.clamp(scale * 3.0, 11, 22)
+			local basePx = math.clamp(scale * 4.5, 13, 23)
 			if u.unitType == "TradeShip" or u.unitType == "Train" then
-				basePx = math.clamp(scale * 2.0, 7, 15)
+				basePx = math.clamp(scale * 3.0, 9, 15)
 			elseif u.unitType == "AtomBomb" or u.unitType == "HydrogenBomb" or u.unitType == "MIRV" then
-				basePx = math.clamp(scale * 3.4, 14, 26)
+				basePx = math.clamp(scale * 5.0, 15, 26)
 			end
 			wObj.root.Size = UDim2.fromOffset(basePx, basePx)
 			wObj.root.Position = UDim2.fromOffset(sx, sy)
 			wObj.stroke.Color = self.fillColor3[u.ownerSmallId] or Color3.new(1, 1, 1)
 
 			local candBadge = ""
-			if not self.hideWorldLabels and scale >= 2.8 then
+			if not self.hideWorldLabels and scale >= 1.2 then
 				if u.underConstruction then
 					candBadge = string.format("%d%%", math.floor((u.constructionProgress or 0) * 100))
 				elseif u.unitType == "TransportShip" then
@@ -953,12 +1165,12 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 			end
 
 			if wObj.rangeRing ~= nil then
-				if u.unitType == "SAMLauncher" and u.ownerSmallId == self.mySmallId and scale >= 2.6 and not self.hideWorldLabels then
-					local dPx = Config.SamRange(u.level or 1) * math.clamp(map.width / 700, 0.55, 1.0) * 2 * scale
+				if u.unitType == "SAMLauncher" and u.ownerSmallId == self.mySmallId and scale >= 1.0 and not self.hideWorldLabels then
+					local dPx = Config.SamRangeScaled(u.level or 1, map.width) * 2 * scale
 					wObj.rangeRing.Size = UDim2.fromOffset(dPx, dPx)
 					wObj.rangeRing.Visible = true
 				elseif u.unitType == "Warship" and self.selectedWarshipId == u.id then
-					local dPx = 84 * scale
+					local dPx = Config.WarshipRangeScaled(map.width) * 2 * scale
 					wObj.rangeRing.Size = UDim2.fromOffset(dPx, dPx)
 					wObj.rangeRing.Visible = true
 				else
@@ -967,7 +1179,6 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 			end
 		end
 
-		-- Draw pulsing red ground target circle for inbound nukes!
 		if u.unitType == "AtomBomb" or u.unitType == "HydrogenBomb" or u.unitType == "MIRV" or u.unitType == "MIRVWarhead" then
 			activeNukeRings[u.id] = true
 			local nr = self.nukeRings[u.id]
@@ -1005,7 +1216,6 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 		end
 	end
 
-	-- 7. Shockwave explosion rings
 	for i = #self.shockwaves, 1, -1 do
 		local sw = self.shockwaves[i]
 		sw.t += dt * 1.65
@@ -1020,6 +1230,12 @@ function MapCanvas:RenderFrame(stateSnapshot: any?, dt: number)
 			sw.frame.BackgroundTransparency = 0.25 + 0.75 * sw.t
 		end
 	end
+end
+
+function MapCanvas:Destroy()
+	self:_DestroyAtlas()
+	self.mapRoot:Destroy()
+	self.overlayRoot:Destroy()
 end
 
 return MapCanvas

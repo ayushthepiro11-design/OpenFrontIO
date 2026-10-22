@@ -1,0 +1,27 @@
+{
+  "name": "OpenFrontRoblox",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "OpenFrontShared": {
+        "$path": "roblox/src/Shared"
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "OpenFrontServer": {
+        "$path": "roblox/src/Server"
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "OpenFrontClient": {
+          "$path": "roblox/src/Client"
+        }
+      }
+    }
+  }
+}
